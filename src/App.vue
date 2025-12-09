@@ -110,11 +110,52 @@ function switchTab(tab: Tab) {
 }
 
 // ============================================================================
+// PERMISSION HELPERS
+// ============================================================================
+
+async function checkAndRequestPermission(
+    permissionName: "camera" | "microphone",
+): Promise<boolean> {
+    try {
+        // Check if Permissions API is available
+        if (navigator.permissions && navigator.permissions.query) {
+            const name = permissionName === "camera" ? "camera" : "microphone";
+            const result = await navigator.permissions.query({
+                name: name as PermissionName,
+            });
+
+            if (result.state === "granted") {
+                return true;
+            } else if (result.state === "prompt") {
+                // Permission will be requested when we call getUserMedia
+                return true;
+            } else if (result.state === "denied") {
+                errorMessage.value = `${permissionName === "camera" ? "Camera" : "Microphone"} permission denied. Please enable it in your device settings.`;
+                return false;
+            }
+        }
+        // If Permissions API not available, try anyway
+        return true;
+    } catch {
+        // Permissions API might not support this permission name
+        // Proceed anyway and let getUserMedia handle it
+        return true;
+    }
+}
+
+// ============================================================================
 // WEBCAM CAPTURE FUNCTIONS
 // ============================================================================
 
 async function startWebcam() {
     clearMessages();
+
+    // Check permission first
+    const hasPermission = await checkAndRequestPermission("camera");
+    if (!hasPermission) {
+        return;
+    }
+
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: "environment", width: 1280, height: 720 },
@@ -130,8 +171,28 @@ async function startWebcam() {
                 videoRef.value.play();
             }
         }, 100);
-    } catch (err) {
-        errorMessage.value = `Failed to access webcam: ${err}`;
+    } catch (err: unknown) {
+        const error = err as Error;
+        if (
+            error.name === "NotAllowedError" ||
+            error.name === "PermissionDeniedError"
+        ) {
+            errorMessage.value =
+                "Camera permission denied. Please allow camera access in your device settings and try again.";
+        } else if (
+            error.name === "NotFoundError" ||
+            error.name === "DevicesNotFoundError"
+        ) {
+            errorMessage.value = "No camera found on this device.";
+        } else if (
+            error.name === "NotReadableError" ||
+            error.name === "TrackStartError"
+        ) {
+            errorMessage.value =
+                "Camera is in use by another application. Please close other apps using the camera.";
+        } else {
+            errorMessage.value = `Failed to access webcam: ${error.message || err}`;
+        }
     }
 }
 
@@ -185,6 +246,13 @@ async function capturePhoto() {
 
 async function startRecording() {
     clearMessages();
+
+    // Check permission first
+    const hasPermission = await checkAndRequestPermission("microphone");
+    if (!hasPermission) {
+        return;
+    }
+
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -224,8 +292,28 @@ async function startRecording() {
         recordingInterval.value = window.setInterval(() => {
             recordingTime.value++;
         }, 1000);
-    } catch (err) {
-        errorMessage.value = `Failed to access microphone: ${err}`;
+    } catch (err: unknown) {
+        const error = err as Error;
+        if (
+            error.name === "NotAllowedError" ||
+            error.name === "PermissionDeniedError"
+        ) {
+            errorMessage.value =
+                "Microphone permission denied. Please allow microphone access in your device settings and try again.";
+        } else if (
+            error.name === "NotFoundError" ||
+            error.name === "DevicesNotFoundError"
+        ) {
+            errorMessage.value = "No microphone found on this device.";
+        } else if (
+            error.name === "NotReadableError" ||
+            error.name === "TrackStartError"
+        ) {
+            errorMessage.value =
+                "Microphone is in use by another application. Please close other apps using the microphone.";
+        } else {
+            errorMessage.value = `Failed to access microphone: ${error.message || err}`;
+        }
     }
 }
 
