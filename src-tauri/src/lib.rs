@@ -1,9 +1,9 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use argon2::Argon2;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
 use rand::RngCore;
 use std::io::Cursor;
@@ -51,8 +51,9 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32], SteganoError> {
 fn encrypt_message(message: &str, passphrase: &str) -> Result<Vec<u8>, SteganoError> {
     let mut salt = [0u8; SALT_SIZE];
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let mut rng = rand::thread_rng();
+    rng.fill_bytes(&mut salt);
+    rng.fill_bytes(&mut nonce_bytes);
 
     let key = derive_key(passphrase, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -209,6 +210,10 @@ fn extract_data(img: &DynamicImage) -> Result<Vec<u8>, SteganoError> {
 
     // Extract the actual data
     let total_bits_needed = 32 + data_length * 8;
+    let total_bits_available = (width * height * 3) as usize;
+    if total_bits_needed > total_bits_available {
+        return Err(SteganoError::NoMessageFound);
+    }
     let mut all_bits = Vec::with_capacity(total_bits_needed);
 
     'outer2: for y in 0..height {
