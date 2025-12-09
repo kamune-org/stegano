@@ -196,8 +196,16 @@ function base64ToArrayBuffer(base64: string): Uint8Array {
 
 function copyToClipboard() {
     if (decodedMessage.value) {
-        navigator.clipboard.writeText(decodedMessage.value);
-        successMessage.value = "Message copied to clipboard!";
+        navigator.clipboard
+            .writeText(decodedMessage.value)
+            .then(() => {
+                successMessage.value = "Message copied to clipboard!";
+                errorMessage.value = "";
+            })
+            .catch(() => {
+                successMessage.value = "";
+                errorMessage.value = "Failed to copy to clipboard.";
+            });
     }
 }
 </script>
