@@ -7,6 +7,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hound::{WavReader, WavWriter};
 use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use thiserror::Error;
 
@@ -43,6 +44,19 @@ const MAGIC_HEADER: &[u8] = b"STEG";
 const SALT_SIZE: usize = 16;
 const NONCE_SIZE: usize = 12;
 
+// Payload type identifiers
+const PAYLOAD_TYPE_TEXT: u8 = 0x01;
+const PAYLOAD_TYPE_FILE: u8 = 0x02;
+
+#[derive(Serialize, Deserialize)]
+struct DecodedContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    content: String,
+    #[serde(rename = "fileName", skip_serializing_if = "Option::is_none")]
+    file_name: Option<String>,
+}
+
 /// Derive a 256-bit key from a passphrase using Argon2
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32], SteganoError> {
     let mut key = [0u8; 32];
@@ -69,9 +83,47 @@ fn encrypt_message(message: &str, passphrase: &str) -> Result<Vec<u8>, SteganoEr
         .encrypt(nonce, message.as_bytes())
         .map_err(|e| SteganoError::EncryptionError(e.to_string()))?;
 
-    // Format: MAGIC_HEADER + salt + nonce + ciphertext
+    // Format: MAGIC_HEADER + PAYLOAD_TYPE_TEXT + salt + nonce + ciphertext
     let mut result = Vec::new();
     result.extend_from_slice(MAGIC_HEADER);
+    result.push(PAYLOAD_TYPE_TEXT);
+    result.extend_from_slice(&salt);
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&ciphertext);
+
+    Ok(result)
+}
+
+/// Encrypt a file with its name using AES-256-GCM
+fn encrypt_file(file_name: &str, file_data: &[u8], passphrase: &str) -> Result<Vec<u8>, SteganoError> {
+    let mut salt = [0u8; SALT_SIZE];
+    let mut nonce_bytes = [0u8; NONCE_SIZE];
+    let mut rng = rand::thread_rng();
+    rng.fill_bytes(&mut salt);
+    rng.fill_bytes(&mut nonce_bytes);
+
+    let key = derive_key(passphrase, &salt)?;
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| SteganoError::EncryptionError(e.to_string()))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    // Create payload: filename_length (2 bytes) + filename + file_data
+    let file_name_bytes = file_name.as_bytes();
+    let file_name_len = file_name_bytes.len() as u16;
+    
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&file_name_len.to_be_bytes());
+    payload.extend_from_slice(file_name_bytes);
+    payload.extend_from_slice(file_data);
+
+    let ciphertext = cipher
+        .encrypt(nonce, payload.as_slice())
+        .map_err(|e| SteganoError::EncryptionError(e.to_string()))?;
+
+    // Format: MAGIC_HEADER + PAYLOAD_TYPE_FILE + salt + nonce + ciphertext
+    let mut result = Vec::new();
+    result.extend_from_slice(MAGIC_HEADER);
+    result.push(PAYLOAD_TYPE_FILE);
     result.extend_from_slice(&salt);
     result.extend_from_slice(&nonce_bytes);
     result.extend_from_slice(&ciphertext);
@@ -81,8 +133,8 @@ fn encrypt_message(message: &str, passphrase: &str) -> Result<Vec<u8>, SteganoEr
 
 /// Decrypt a message using AES-256-GCM
 fn decrypt_message(data: &[u8], passphrase: &str) -> Result<String, SteganoError> {
-    // Check magic header
-    if data.len() < MAGIC_HEADER.len() + SALT_SIZE + NONCE_SIZE {
+    // Check magic header and minimum length
+    if data.len() < MAGIC_HEADER.len() + 1 + SALT_SIZE + NONCE_SIZE {
         return Err(SteganoError::InvalidFormat);
     }
 
@@ -90,10 +142,15 @@ fn decrypt_message(data: &[u8], passphrase: &str) -> Result<String, SteganoError
         return Err(SteganoError::NoMessageFound);
     }
 
-    let salt = &data[MAGIC_HEADER.len()..MAGIC_HEADER.len() + SALT_SIZE];
-    let nonce_bytes =
-        &data[MAGIC_HEADER.len() + SALT_SIZE..MAGIC_HEADER.len() + SALT_SIZE + NONCE_SIZE];
-    let ciphertext = &data[MAGIC_HEADER.len() + SALT_SIZE + NONCE_SIZE..];
+    let payload_type = data[MAGIC_HEADER.len()];
+    if payload_type != PAYLOAD_TYPE_TEXT {
+        return Err(SteganoError::InvalidFormat);
+    }
+
+    let offset = MAGIC_HEADER.len() + 1;
+    let salt = &data[offset..offset + SALT_SIZE];
+    let nonce_bytes = &data[offset + SALT_SIZE..offset + SALT_SIZE + NONCE_SIZE];
+    let ciphertext = &data[offset + SALT_SIZE + NONCE_SIZE..];
 
     let key = derive_key(passphrase, salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -105,6 +162,67 @@ fn decrypt_message(data: &[u8], passphrase: &str) -> Result<String, SteganoError
         .map_err(|_| SteganoError::DecryptionFailed)?;
 
     String::from_utf8(plaintext).map_err(|_| SteganoError::InvalidFormat)
+}
+
+/// Decrypt content and return its type (text or file)
+fn decrypt_content(data: &[u8], passphrase: &str) -> Result<DecodedContent, SteganoError> {
+    // Check magic header and minimum length
+    if data.len() < MAGIC_HEADER.len() + 1 + SALT_SIZE + NONCE_SIZE {
+        return Err(SteganoError::InvalidFormat);
+    }
+
+    if &data[..MAGIC_HEADER.len()] != MAGIC_HEADER {
+        return Err(SteganoError::NoMessageFound);
+    }
+
+    let payload_type = data[MAGIC_HEADER.len()];
+    let offset = MAGIC_HEADER.len() + 1;
+    let salt = &data[offset..offset + SALT_SIZE];
+    let nonce_bytes = &data[offset + SALT_SIZE..offset + SALT_SIZE + NONCE_SIZE];
+    let ciphertext = &data[offset + SALT_SIZE + NONCE_SIZE..];
+
+    let key = derive_key(passphrase, salt)?;
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| SteganoError::EncryptionError(e.to_string()))?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| SteganoError::DecryptionFailed)?;
+
+    match payload_type {
+        PAYLOAD_TYPE_TEXT => {
+            let message = String::from_utf8(plaintext)
+                .map_err(|_| SteganoError::InvalidFormat)?;
+            Ok(DecodedContent {
+                content_type: "text".to_string(),
+                content: message,
+                file_name: None,
+            })
+        }
+        PAYLOAD_TYPE_FILE => {
+            if plaintext.len() < 2 {
+                return Err(SteganoError::InvalidFormat);
+            }
+            
+            let file_name_len = u16::from_be_bytes([plaintext[0], plaintext[1]]) as usize;
+            if plaintext.len() < 2 + file_name_len {
+                return Err(SteganoError::InvalidFormat);
+            }
+            
+            let file_name = String::from_utf8(plaintext[2..2 + file_name_len].to_vec())
+                .map_err(|_| SteganoError::InvalidFormat)?;
+            let file_data = &plaintext[2 + file_name_len..];
+            let file_data_base64 = BASE64.encode(file_data);
+            
+            Ok(DecodedContent {
+                content_type: "file".to_string(),
+                content: file_data_base64,
+                file_name: Some(file_name),
+            })
+        }
+        _ => Err(SteganoError::InvalidFormat),
+    }
 }
 
 // ============================================================================
@@ -419,6 +537,40 @@ async fn encode_message(
 }
 
 #[tauri::command]
+async fn encode_file(
+    image_base64: String,
+    file_name: String,
+    file_data: String,
+    passphrase: String,
+) -> Result<String, SteganoError> {
+    // Decode the base64 image
+    let image_data = BASE64
+        .decode(&image_base64)
+        .map_err(|_| SteganoError::InvalidFormat)?;
+
+    // Decode the base64 file data
+    let file_bytes = BASE64
+        .decode(&file_data)
+        .map_err(|_| SteganoError::InvalidFormat)?;
+
+    // Load the image
+    let img = image::load_from_memory(&image_data)?;
+
+    // Encrypt the file
+    let encrypted_data = encrypt_file(&file_name, &file_bytes, &passphrase)?;
+
+    // Embed the encrypted data into the image
+    let output_img = embed_data_image(&img, &encrypted_data)?;
+
+    // Encode the output image as PNG
+    let mut output_buffer = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(output_img).write_to(&mut output_buffer, ImageFormat::Png)?;
+
+    // Return as base64
+    Ok(BASE64.encode(output_buffer.into_inner()))
+}
+
+#[tauri::command]
 async fn decode_message(image_base64: String, passphrase: String) -> Result<String, SteganoError> {
     // Decode the base64 image
     let image_data = BASE64
@@ -438,6 +590,26 @@ async fn decode_message(image_base64: String, passphrase: String) -> Result<Stri
 }
 
 #[tauri::command]
+async fn decode_content(
+    image_base64: String,
+    passphrase: String,
+) -> Result<DecodedContent, SteganoError> {
+    // Decode the base64 image
+    let image_data = BASE64
+        .decode(&image_base64)
+        .map_err(|_| SteganoError::InvalidFormat)?;
+
+    // Load the image
+    let img = image::load_from_memory(&image_data)?;
+
+    // Extract the hidden data
+    let encrypted_data = extract_data_image(&img)?;
+
+    // Decrypt and return content
+    decrypt_content(&encrypted_data, &passphrase)
+}
+
+#[tauri::command]
 fn get_image_capacity(image_base64: String) -> Result<usize, SteganoError> {
     let image_data = BASE64
         .decode(&image_base64)
@@ -446,8 +618,8 @@ fn get_image_capacity(image_base64: String) -> Result<usize, SteganoError> {
     let img = image::load_from_memory(&image_data)?;
     let (width, height) = img.dimensions();
 
-    // Calculate max bytes (subtract header overhead: magic + salt + nonce + auth tag)
-    let overhead = MAGIC_HEADER.len() + SALT_SIZE + NONCE_SIZE + 16; // 16 is AES-GCM auth tag
+    // Calculate max bytes (subtract header overhead: magic + type + salt + nonce + auth tag)
+    let overhead = MAGIC_HEADER.len() + 1 + SALT_SIZE + NONCE_SIZE + 16; // 16 is AES-GCM auth tag
     let raw_capacity = ((width * height * 3) / 8) as usize - 4;
 
     Ok(raw_capacity.saturating_sub(overhead))
@@ -479,6 +651,33 @@ async fn encode_audio_message(
 }
 
 #[tauri::command]
+async fn encode_audio_file(
+    audio_base64: String,
+    file_name: String,
+    file_data: String,
+    passphrase: String,
+) -> Result<String, SteganoError> {
+    // Decode the base64 audio
+    let audio_data = BASE64
+        .decode(&audio_base64)
+        .map_err(|_| SteganoError::InvalidFormat)?;
+
+    // Decode the base64 file data
+    let file_bytes = BASE64
+        .decode(&file_data)
+        .map_err(|_| SteganoError::InvalidFormat)?;
+
+    // Encrypt the file
+    let encrypted_data = encrypt_file(&file_name, &file_bytes, &passphrase)?;
+
+    // Embed the encrypted data into the audio
+    let output_audio = embed_data_audio(&audio_data, &encrypted_data)?;
+
+    // Return as base64
+    Ok(BASE64.encode(output_audio))
+}
+
+#[tauri::command]
 async fn decode_audio_message(
     audio_base64: String,
     passphrase: String,
@@ -498,6 +697,23 @@ async fn decode_audio_message(
 }
 
 #[tauri::command]
+async fn decode_audio_content(
+    audio_base64: String,
+    passphrase: String,
+) -> Result<DecodedContent, SteganoError> {
+    // Decode the base64 audio
+    let audio_data = BASE64
+        .decode(&audio_base64)
+        .map_err(|_| SteganoError::InvalidFormat)?;
+
+    // Extract the hidden data
+    let encrypted_data = extract_data_audio(&audio_data)?;
+
+    // Decrypt and return content
+    decrypt_content(&encrypted_data, &passphrase)
+}
+
+#[tauri::command]
 fn get_audio_capacity(audio_base64: String) -> Result<usize, SteganoError> {
     let audio_data = BASE64
         .decode(&audio_base64)
@@ -508,8 +724,8 @@ fn get_audio_capacity(audio_base64: String) -> Result<usize, SteganoError> {
 
     let num_samples = reader.len() as usize;
 
-    // Calculate max bytes (subtract header overhead: magic + salt + nonce + auth tag)
-    let overhead = MAGIC_HEADER.len() + SALT_SIZE + NONCE_SIZE + 16; // 16 is AES-GCM auth tag
+    // Calculate max bytes (subtract header overhead: magic + type + salt + nonce + auth tag)
+    let overhead = MAGIC_HEADER.len() + 1 + SALT_SIZE + NONCE_SIZE + 16; // 16 is AES-GCM auth tag
     let raw_capacity = (num_samples / 8) - 4;
 
     Ok(raw_capacity.saturating_sub(overhead))
@@ -527,10 +743,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             encode_message,
+            encode_file,
             decode_message,
+            decode_content,
             get_image_capacity,
             encode_audio_message,
+            encode_audio_file,
             decode_audio_message,
+            decode_audio_content,
             get_audio_capacity
         ])
         .run(tauri::generate_context!())

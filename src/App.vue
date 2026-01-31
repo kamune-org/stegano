@@ -16,6 +16,8 @@ const successMessage = ref("");
 const encodeImage = ref<string | null>(null);
 const encodeImageName = ref("");
 const encodeMessage = ref("");
+const encodeFile = ref<{ name: string; data: string } | null>(null);
+const useFileMode = ref(false);
 const encodePassphrase = ref("");
 const imageCapacity = ref<number | null>(null);
 const encodedImageResult = ref<string | null>(null);
@@ -25,11 +27,14 @@ const decodeImage = ref<string | null>(null);
 const decodeImageName = ref("");
 const decodeImagePassphrase = ref("");
 const decodedImageMessage = ref("");
+const decodedImageFile = ref<{ name: string; data: string } | null>(null);
 
 // Audio Encode state
 const encodeAudio = ref<string | null>(null);
 const encodeAudioName = ref("");
 const encodeAudioMessage = ref("");
+const encodeAudioFile = ref<{ name: string; data: string } | null>(null);
+const useAudioFileMode = ref(false);
 const encodeAudioPassphrase = ref("");
 const audioCapacity = ref<number | null>(null);
 const encodedAudioResult = ref<string | null>(null);
@@ -39,6 +44,7 @@ const decodeAudio = ref<string | null>(null);
 const decodeAudioName = ref("");
 const decodeAudioPassphrase = ref("");
 const decodedAudioMessage = ref("");
+const decodedAudioFile = ref<{ name: string; data: string } | null>(null);
 
 // Webcam capture state
 const showWebcam = ref(false);
@@ -56,25 +62,38 @@ const recordingInterval = ref<number | null>(null);
 
 const messageLength = computed(() => {
     if (activeMode.value === "image") {
+        if (useFileMode.value && encodeFile.value) {
+            // File data is base64, calculate actual size
+            return Math.ceil(encodeFile.value.data.length * 0.75) + encodeFile.value.name.length + 100; // overhead for metadata
+        }
         return new TextEncoder().encode(encodeMessage.value).length;
     } else {
+        if (useAudioFileMode.value && encodeAudioFile.value) {
+            return Math.ceil(encodeAudioFile.value.data.length * 0.75) + encodeAudioFile.value.name.length + 100;
+        }
         return new TextEncoder().encode(encodeAudioMessage.value).length;
     }
 });
 
 const canEncode = computed(() => {
     if (activeMode.value === "image") {
+        const hasContent = useFileMode.value
+            ? encodeFile.value !== null
+            : encodeMessage.value.trim() !== "";
         return (
             encodeImage.value &&
-            encodeMessage.value.trim() &&
+            hasContent &&
             encodePassphrase.value &&
             imageCapacity.value !== null &&
             messageLength.value <= imageCapacity.value
         );
     } else {
+        const hasContent = useAudioFileMode.value
+            ? encodeAudioFile.value !== null
+            : encodeAudioMessage.value.trim() !== "";
         return (
             encodeAudio.value &&
-            encodeAudioMessage.value.trim() &&
+            hasContent &&
             encodeAudioPassphrase.value &&
             audioCapacity.value !== null &&
             messageLength.value <= audioCapacity.value
@@ -442,6 +461,51 @@ function formatTime(seconds: number): string {
 }
 
 // ============================================================================
+// FILE SELECTION FUNCTIONS
+// ============================================================================
+
+async function selectFileToEncode() {
+    clearMessages();
+    try {
+        const selected = await open({
+            multiple: false,
+        });
+
+        if (selected) {
+            const fileData = await readFile(selected);
+            const base64 = arrayBufferToBase64(fileData);
+            const fileName = selected.split("/").pop() || selected;
+            
+            if (activeMode.value === "image") {
+                encodeFile.value = { name: fileName, data: base64 };
+                successMessage.value = `File selected: ${fileName} (${formatBytes(fileData.length)})`;
+            } else {
+                encodeAudioFile.value = { name: fileName, data: base64 };
+                successMessage.value = `File selected: ${fileName} (${formatBytes(fileData.length)})`;
+            }
+        }
+    } catch (err) {
+        errorMessage.value = `Failed to load file: ${err}`;
+    }
+}
+
+async function saveDecodedFile(fileName: string, fileData: string) {
+    try {
+        const savePath = await save({
+            defaultPath: fileName,
+        });
+
+        if (savePath) {
+            const binaryData = base64ToArrayBuffer(fileData);
+            await writeFile(savePath, binaryData);
+            successMessage.value = `File saved to ${savePath}`;
+        }
+    } catch (err) {
+        errorMessage.value = `Failed to save file: ${err}`;
+    }
+}
+
+// ============================================================================
 // IMAGE FUNCTIONS
 // ============================================================================
 
@@ -508,11 +572,24 @@ async function encodeMessageIntoImage() {
     isLoading.value = true;
 
     try {
-        const result = await invoke<string>("encode_message", {
-            imageBase64: encodeImage.value,
-            message: encodeMessage.value,
-            passphrase: encodePassphrase.value,
-        });
+        let result: string;
+        
+        if (useFileMode.value && encodeFile.value) {
+            // Encode file mode
+            result = await invoke<string>("encode_file", {
+                imageBase64: encodeImage.value,
+                fileName: encodeFile.value.name,
+                fileData: encodeFile.value.data,
+                passphrase: encodePassphrase.value,
+            });
+        } else {
+            // Encode text message mode
+            result = await invoke<string>("encode_message", {
+                imageBase64: encodeImage.value,
+                message: encodeMessage.value,
+                passphrase: encodePassphrase.value,
+            });
+        }
 
         encodedImageResult.value = result;
         successMessage.value =
@@ -560,13 +637,26 @@ async function decodeMessageFromImage() {
     isLoading.value = true;
 
     try {
-        const result = await invoke<string>("decode_message", {
-            imageBase64: decodeImage.value,
-            passphrase: decodeImagePassphrase.value,
-        });
+        const result = await invoke<{ type: string; content: string; fileName?: string }>(
+            "decode_content",
+            {
+                imageBase64: decodeImage.value,
+                passphrase: decodeImagePassphrase.value,
+            }
+        );
 
-        decodedImageMessage.value = result;
-        successMessage.value = "Message decoded successfully!";
+        if (result.type === "file" && result.fileName) {
+            decodedImageFile.value = {
+                name: result.fileName,
+                data: result.content,
+            };
+            decodedImageMessage.value = "";
+            successMessage.value = `File decoded successfully: ${result.fileName}`;
+        } else {
+            decodedImageMessage.value = result.content;
+            decodedImageFile.value = null;
+            successMessage.value = "Message decoded successfully!";
+        }
     } catch (err) {
         errorMessage.value = `Decoding failed: ${err}`;
     } finally {
@@ -641,11 +731,24 @@ async function encodeMessageIntoAudio() {
     isLoading.value = true;
 
     try {
-        const result = await invoke<string>("encode_audio_message", {
-            audioBase64: encodeAudio.value,
-            message: encodeAudioMessage.value,
-            passphrase: encodeAudioPassphrase.value,
-        });
+        let result: string;
+        
+        if (useAudioFileMode.value && encodeAudioFile.value) {
+            // Encode file mode
+            result = await invoke<string>("encode_audio_file", {
+                audioBase64: encodeAudio.value,
+                fileName: encodeAudioFile.value.name,
+                fileData: encodeAudioFile.value.data,
+                passphrase: encodeAudioPassphrase.value,
+            });
+        } else {
+            // Encode text message mode
+            result = await invoke<string>("encode_audio_message", {
+                audioBase64: encodeAudio.value,
+                message: encodeAudioMessage.value,
+                passphrase: encodeAudioPassphrase.value,
+            });
+        }
 
         encodedAudioResult.value = result;
         successMessage.value =
@@ -693,13 +796,26 @@ async function decodeMessageFromAudio() {
     isLoading.value = true;
 
     try {
-        const result = await invoke<string>("decode_audio_message", {
-            audioBase64: decodeAudio.value,
-            passphrase: decodeAudioPassphrase.value,
-        });
+        const result = await invoke<{ type: string; content: string; fileName?: string }>(
+            "decode_audio_content",
+            {
+                audioBase64: decodeAudio.value,
+                passphrase: decodeAudioPassphrase.value,
+            }
+        );
 
-        decodedAudioMessage.value = result;
-        successMessage.value = "Message decoded successfully!";
+        if (result.type === "file" && result.fileName) {
+            decodedAudioFile.value = {
+                name: result.fileName,
+                data: result.content,
+            };
+            decodedAudioMessage.value = "";
+            successMessage.value = `File decoded successfully: ${result.fileName}`;
+        } else {
+            decodedAudioMessage.value = result.content;
+            decodedAudioFile.value = null;
+            successMessage.value = "Message decoded successfully!";
+        }
     } catch (err) {
         errorMessage.value = `Decoding failed: ${err}`;
     } finally {
@@ -909,7 +1025,24 @@ onUnmounted(() => {
                 </span>
             </div>
 
-            <div class="input-group">
+            <!-- Mode Toggle: Text vs File -->
+            <div class="mode-toggle">
+                <button
+                    :class="['toggle-btn', { active: !useFileMode }]"
+                    @click="useFileMode = false; encodeFile = null; clearMessages();"
+                >
+                    💬 Text Message
+                </button>
+                <button
+                    :class="['toggle-btn', { active: useFileMode }]"
+                    @click="useFileMode = true; encodeMessage = ''; clearMessages();"
+                >
+                    📎 File
+                </button>
+            </div>
+
+            <!-- Text Message Input -->
+            <div v-if="!useFileMode" class="input-group">
                 <label for="encode-message">Secret Message</label>
                 <textarea
                     id="encode-message"
@@ -917,6 +1050,19 @@ onUnmounted(() => {
                     placeholder="Enter your secret message..."
                     rows="4"
                 ></textarea>
+            </div>
+
+            <!-- File Input -->
+            <div v-if="useFileMode" class="input-group">
+                <label>File to Hide</label>
+                <div class="file-input-area">
+                    <button class="select-btn" @click="selectFileToEncode">
+                        📎 {{ encodeFile ? 'Change File' : 'Select File' }}
+                    </button>
+                    <span v-if="encodeFile" class="file-name">
+                        {{ encodeFile.name }}
+                    </span>
+                </div>
             </div>
 
             <div class="input-group">
@@ -935,7 +1081,7 @@ onUnmounted(() => {
                     :disabled="!canEncode || isLoading"
                     @click="encodeMessageIntoImage"
                 >
-                    {{ isLoading ? "Encoding..." : "Encode Message" }}
+                    {{ isLoading ? "Encoding..." : "Encode " + (useFileMode ? "File" : "Message") }}
                 </button>
                 <button
                     v-if="encodedImageResult"
@@ -1009,6 +1155,22 @@ onUnmounted(() => {
                     </button>
                 </div>
             </div>
+
+            <div v-if="decodedImageFile" class="decoded-result">
+                <h3>Decoded File</h3>
+                <div class="file-result">
+                    <div class="file-info">
+                        <span class="file-icon">📎</span>
+                        <span class="file-name-display">{{ decodedImageFile.name }}</span>
+                    </div>
+                    <button
+                        class="primary-btn"
+                        @click="saveDecodedFile(decodedImageFile.name, decodedImageFile.data)"
+                    >
+                        💾 Save File
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- ================================================================ -->
@@ -1058,7 +1220,24 @@ onUnmounted(() => {
                 </span>
             </div>
 
-            <div class="input-group">
+            <!-- Mode Toggle: Text vs File -->
+            <div class="mode-toggle">
+                <button
+                    :class="['toggle-btn', { active: !useAudioFileMode }]"
+                    @click="useAudioFileMode = false; encodeAudioFile = null; clearMessages();"
+                >
+                    💬 Text Message
+                </button>
+                <button
+                    :class="['toggle-btn', { active: useAudioFileMode }]"
+                    @click="useAudioFileMode = true; encodeAudioMessage = ''; clearMessages();"
+                >
+                    📎 File
+                </button>
+            </div>
+
+            <!-- Text Message Input -->
+            <div v-if="!useAudioFileMode" class="input-group">
                 <label for="encode-audio-message">Secret Message</label>
                 <textarea
                     id="encode-audio-message"
@@ -1066,6 +1245,19 @@ onUnmounted(() => {
                     placeholder="Enter your secret message..."
                     rows="4"
                 ></textarea>
+            </div>
+
+            <!-- File Input -->
+            <div v-if="useAudioFileMode" class="input-group">
+                <label>File to Hide</label>
+                <div class="file-input-area">
+                    <button class="select-btn" @click="selectFileToEncode">
+                        📎 {{ encodeAudioFile ? 'Change File' : 'Select File' }}
+                    </button>
+                    <span v-if="encodeAudioFile" class="file-name">
+                        {{ encodeAudioFile.name }}
+                    </span>
+                </div>
             </div>
 
             <div class="input-group">
@@ -1084,7 +1276,7 @@ onUnmounted(() => {
                     :disabled="!canEncode || isLoading"
                     @click="encodeMessageIntoAudio"
                 >
-                    {{ isLoading ? "Encoding..." : "Encode Message" }}
+                    {{ isLoading ? "Encoding..." : "Encode " + (useAudioFileMode ? "File" : "Message") }}
                 </button>
                 <button
                     v-if="encodedAudioResult"
@@ -1166,6 +1358,22 @@ onUnmounted(() => {
                         title="Copy to clipboard"
                     >
                         📋
+                    </button>
+                </div>
+            </div>
+
+            <div v-if="decodedAudioFile" class="decoded-result">
+                <h3>Decoded File</h3>
+                <div class="file-result">
+                    <div class="file-info">
+                        <span class="file-icon">📎</span>
+                        <span class="file-name-display">{{ decodedAudioFile.name }}</span>
+                    </div>
+                    <button
+                        class="primary-btn"
+                        @click="saveDecodedFile(decodedAudioFile.name, decodedAudioFile.data)"
+                    >
+                        💾 Save File
                     </button>
                 </div>
             </div>
