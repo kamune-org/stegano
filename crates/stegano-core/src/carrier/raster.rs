@@ -212,7 +212,7 @@ impl Raster {
             } else {
                 png::BitDepth::Eight
             });
-            enc.set_compression(png::Compression::High);
+            enc.set_compression(png::Compression::Fast);
             let mut writer = enc.write_header().map_err(encode_err)?;
             let bytes: Vec<u8> = if self.depth == 16 {
                 samples.iter().flat_map(|s| s.to_be_bytes()).collect()

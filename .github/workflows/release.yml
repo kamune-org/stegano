@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -32,14 +31,10 @@ jobs:
         id: meta
         run: |
           version=$(jq -r .version src-tauri/tauri.conf.json)
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            tag="$GITHUB_REF_NAME"
-            if [ "$tag" != "v$version" ]; then
-              echo "::error::Tag $tag does not match tauri.conf.json version v$version"
-              exit 1
-            fi
-          else
-            tag="v$version"
+          tag="$GITHUB_REF_NAME"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Tag $tag does not match tauri.conf.json version v$version"
+            exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -96,7 +91,10 @@ jobs:
             libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -104,7 +102,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: bun install --frozen-lockfile
+      - run: npm ci
 
       # Only export signing variables that are actually set: empty values make
       # Tauri attempt (and fail) to sign/notarize.
@@ -143,7 +141,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tauriScript: bun tauri
+          tauriScript: npm run tauri
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
@@ -214,7 +212,10 @@ jobs:
           sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;${NDK_VERSION}"
           echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -224,7 +225,7 @@ jobs:
         with:
           key: android
 
-      - run: bun install --frozen-lockfile
+      - run: npm ci
 
       # Without these secrets the build.gradle.kts leaves the release unsigned.
       - name: Configure Android signing (optional)
@@ -251,7 +252,7 @@ jobs:
           fi
 
       - name: Build APK and AAB
-        run: bun tauri android build --apk --aab
+        run: npm run tauri -- android build --apk --aab
 
       - name: Collect artifacts
         run: |

@@ -14,6 +14,10 @@ repository = "https://github.com/kamune-org/stegano"
 codegen-units = 1
 lto = "thin"
 
-# STC and the cost filters are hot loops; keep tests usable without --release.
+# Dev builds (`tauri dev`, `cargo test`) optimize the hot code: STC, the cost
+# filters, Argon2, AES and the image/audio codecs are unusably slow at -O0.
 [profile.dev.package.stegano-core]
+opt-level = 3
+
+[profile.dev.package."*"]
 opt-level = 3

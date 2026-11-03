@@ -72,34 +72,44 @@ fn block(i: usize, n: usize, m: usize) -> Range<usize> {
     at(i)..at(i + 1)
 }
 
-/// Embed `msg` into `cover` (parity bits) choosing the cheapest changes.
-/// Returns the stego parity bits, or `None` if the message can only be
+/// Embed `msg` into `n` cover elements, choosing the cheapest changes.
+/// `element(j)` returns the parity bit and change cost of element `j`; it is
+/// called from worker threads, chunk by chunk. Returns the (sorted) indices of
+/// the elements whose parity must flip, or `None` if the message can only be
 /// embedded by touching elements with infinite cost.
-pub(crate) fn embed(cover: &[u8], costs: &[f32], msg: &[u8]) -> Option<Vec<u8>> {
-    assert_eq!(cover.len(), costs.len());
-    assert!(msg.len() <= cover.len());
-    let plan = plan(cover.len(), msg.len());
+pub(crate) fn embed(
+    n: usize,
+    msg: &[u8],
+    element: impl Fn(usize) -> (u8, f32) + Sync,
+) -> Option<Vec<usize>> {
+    assert!(msg.len() <= n);
+    let plan = plan(n, msg.len());
     let parts = plan
         .chunks
         .par_iter()
         .map(|c| {
-            viterbi(
-                &cover[c.cols.clone()],
-                &costs[c.cols.clone()],
-                &msg[c.bits.clone()],
-                plan.h,
+            let (x, rho): (Vec<u8>, Vec<f32>) = c.cols.clone().map(&element).unzip();
+            let y = viterbi(&x, &rho, &msg[c.bits.clone()], plan.h)?;
+            Some(
+                (0..x.len())
+                    .filter(|&j| x[j] != y[j])
+                    .map(|j| c.cols.start + j)
+                    .collect::<Vec<_>>(),
             )
         })
         .collect::<Option<Vec<_>>>()?;
     Some(parts.concat())
 }
 
-/// Read `m` message bits back out of the stego parity bits.
-pub(crate) fn extract(stego: &[u8], m: usize) -> Vec<u8> {
-    let plan = plan(stego.len(), m);
+/// Read `m` message bits back out of `n` elements, given each one's parity.
+pub(crate) fn extract(n: usize, m: usize, parity: impl Fn(usize) -> u8 + Sync) -> Vec<u8> {
+    let plan = plan(n, m);
     plan.chunks
         .par_iter()
-        .map(|c| syndrome(&stego[c.cols.clone()], c.bits.len(), plan.h))
+        .map(|c| {
+            let y: Vec<u8> = c.cols.clone().map(&parity).collect();
+            syndrome(&y, c.bits.len(), plan.h)
+        })
         .collect::<Vec<_>>()
         .concat()
 }
@@ -143,8 +153,9 @@ fn viterbi(x: &[u8], rho: &[f32], msg: &[u8], h: u32) -> Option<Vec<u8>> {
     }
     let hhat = submatrix(h, n.div_ceil(m));
     let states = 1usize << h;
-    let words = states / 64;
-    let mut path = vec![0u64; n * words];
+    // One survivor bit per state per column, packed 8 states to a byte.
+    let groups = states / LANES;
+    let mut path = vec![0u8; n * groups];
     let mut cost = vec![f32::INFINITY; states];
     let mut next = vec![0f32; states];
     cost[0] = 0.0;
@@ -160,18 +171,19 @@ fn viterbi(x: &[u8], rho: &[f32], msg: &[u8], h: u32) -> Option<Vec<u8>> {
             } else {
                 (rho[j], 0.0)
             };
-            let p = &mut path[j * words..(j + 1) * words];
-            for (wi, word) in p.iter_mut().enumerate() {
-                let mut bits = 0u64;
-                for b in 0..64 {
-                    let s = wi * 64 + b;
-                    let keep = cost[s] + c0;
-                    let flip = cost[s ^ col] + c1;
-                    let take = flip < keep;
-                    next[s] = if take { flip } else { keep };
-                    bits |= (take as u64) << b;
-                }
-                *word = bits;
+            let p = &mut path[j * groups..(j + 1) * groups];
+            let hi = col & !(LANES - 1);
+            // Monomorphize on the low bits of `col` so the in-group shuffle is
+            // a constant and the loop vectorizes.
+            match col & (LANES - 1) {
+                0 => acs::<0>(&cost, &mut next, p, hi, c0, c1),
+                1 => acs::<1>(&cost, &mut next, p, hi, c0, c1),
+                2 => acs::<2>(&cost, &mut next, p, hi, c0, c1),
+                3 => acs::<3>(&cost, &mut next, p, hi, c0, c1),
+                4 => acs::<4>(&cost, &mut next, p, hi, c0, c1),
+                5 => acs::<5>(&cost, &mut next, p, hi, c0, c1),
+                6 => acs::<6>(&cost, &mut next, p, hi, c0, c1),
+                _ => acs::<7>(&cost, &mut next, p, hi, c0, c1),
             }
             std::mem::swap(&mut cost, &mut next);
         }
@@ -209,7 +221,7 @@ fn viterbi(x: &[u8], rho: &[f32], msg: &[u8], h: u32) -> Option<Vec<u8>> {
         let mask = row_mask(h, m - i);
         let cols = block(i, n, m);
         for j in cols.clone().rev() {
-            let take = (path[j * words + state / 64] >> (state % 64)) & 1;
+            let take = (path[j * groups + state / LANES] >> (state % LANES)) & 1;
             y[j] = take as u8;
             if take == 1 {
                 state ^= (hhat[j - cols.start] & mask) as usize;
@@ -220,10 +232,60 @@ fn viterbi(x: &[u8], rho: &[f32], msg: &[u8], h: u32) -> Option<Vec<u8>> {
     Some(y)
 }
 
+const LANES: usize = 8;
+
+/// One trellis column: for every state `s`, keep the cheaper of staying (stego
+/// bit 0) or arriving from `s ^ col` (stego bit 1), recording the choice.
+/// States are processed in groups of `LANES`; the partner of group `g` is
+/// group `g ^ hi`, with lanes permuted by `LO`.
+#[inline(always)]
+fn acs<const LO: usize>(
+    cost: &[f32],
+    next: &mut [f32],
+    path: &mut [u8],
+    hi: usize,
+    c0: f32,
+    c1: f32,
+) {
+    let groups = cost.as_chunks::<LANES>().0;
+    let hi = hi / LANES;
+    for (g, (out, bits)) in next
+        .as_chunks_mut::<LANES>()
+        .0
+        .iter_mut()
+        .zip(path.iter_mut())
+        .enumerate()
+    {
+        let (own, other) = (&groups[g], &groups[g ^ hi]);
+        let mut mask = 0u8;
+        for l in 0..LANES {
+            let keep = own[l] + c0;
+            let flip = other[l ^ LO] + c1;
+            let take = flip < keep;
+            out[l] = if take { flip } else { keep };
+            mask |= (take as u8) << l;
+        }
+        *bits = mask;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    fn stego_bits(cover: &[u8], costs: &[f32], msg: &[u8]) -> Option<Vec<u8>> {
+        let flips = embed(cover.len(), msg, |j| (cover[j], costs[j]))?;
+        let mut y = cover.to_vec();
+        for j in flips {
+            y[j] ^= 1;
+        }
+        Some(y)
+    }
+
+    fn read(y: &[u8], m: usize) -> Vec<u8> {
+        extract(y.len(), m, |j| y[j])
+    }
 
     fn random_case(n: usize, m: usize, seed: u64) -> (Vec<u8>, Vec<f32>, Vec<u8>) {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -244,8 +306,8 @@ mod tests {
             (300_000, 20_000),
         ] {
             let (cover, costs, msg) = random_case(n, m, n as u64 ^ m as u64);
-            let stego = embed(&cover, &costs, &msg).unwrap();
-            assert_eq!(extract(&stego, m), msg, "n={n} m={m}");
+            let stego = stego_bits(&cover, &costs, &msg).unwrap();
+            assert_eq!(read(&stego, m), msg, "n={n} m={m}");
         }
     }
 
@@ -254,7 +316,7 @@ mod tests {
         // At rate 1/10, plain LSB replacement changes ~50% of 1 in 10 elements
         // (5%). STC with h=10 needs well under half that.
         let (cover, costs, msg) = random_case(100_000, 10_000, 9);
-        let stego = embed(&cover, &vec![1.0; costs.len()], &msg).unwrap();
+        let stego = stego_bits(&cover, &vec![1.0; costs.len()], &msg).unwrap();
         let changes = cover.iter().zip(&stego).filter(|(a, b)| a != b).count();
         assert!(changes < 2_200, "changes = {changes}");
     }
@@ -265,12 +327,12 @@ mod tests {
         for c in costs.iter_mut().step_by(2) {
             *c = f32::INFINITY;
         }
-        let stego = embed(&cover, &costs, &msg).unwrap();
+        let stego = stego_bits(&cover, &costs, &msg).unwrap();
         for (i, (a, b)) in cover.iter().zip(&stego).enumerate() {
             if a != b {
                 assert!(costs[i].is_finite());
             }
         }
-        assert_eq!(extract(&stego, msg.len()), msg);
+        assert_eq!(read(&stego, msg.len()), msg);
     }
 }

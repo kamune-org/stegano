@@ -1,6 +1,5 @@
 # Stegano
 
-[![CI](https://github.com/kamune-org/stegano/actions/workflows/ci.yml/badge.svg)](https://github.com/kamune-org/stegano/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Stegano hides encrypted text messages and files inside images and audio. The payload is encrypted, then spread through the carrier so the result looks like an ordinary file of the same format.
@@ -57,6 +56,18 @@ On real photos, hiding about 100 KB in an 8-megapixel JPEG changed about 0.7% of
 
 As a sanity check, Sample Pair Analysis (a classic LSB detector) estimates a 51% flip rate in the top rows of an image made with 0.1.x. On a 0.2 stego image carrying the same 100 KB it returns exactly the same value as on the untouched original. SPA targets LSB replacement only; machine-learning detectors are the real threat to ±1 embedding, which is what the recommended size guards against.
 
+## Performance
+
+On an Apple M4 Pro (release build), with a 100 KB payload:
+
+| Carrier | Hide | Reveal |
+| --- | --- | --- |
+| 8 MP JPEG | 1.2 s | 0.3 s |
+| 8 MP PNG | 0.8 s | 0.3 s |
+| 36 MP PNG | 2.7 s | — |
+
+Argon2id itself takes about 70 ms; the rest is spread across all cores with `rayon` (cost maps, the keyed permutation, which is a parallel sort by ChaCha20 tags, and STC, which runs in independent chunks and segments). Debug builds (`npm run tauri dev`) optimize dependencies too, so they are only modestly slower.
+
 ## Capacity
 
 Each carrier shows two numbers:
@@ -75,7 +86,7 @@ Example, a 3840×2160 photo:
 
 - **No steganography is undetectable.** Stay under the recommended size, and use carriers you have the only copy of (your own fresh photos), not images downloaded from the web.
 - **Recompression destroys the data.** Messengers, social networks, and email clients that "optimise" images re-encode media and remove the hidden data. Send the output as a file or document.
-- **Memory use is high.** Large images need a lot of RAM, around 800 MB to 1 GB for an 8 MP image.
+- **Memory use is high.** Hiding in an 8 MP image needs about 1 GB of RAM; revealing about 0.6 GB.
 
 ## Command-line tool
 
@@ -107,16 +118,16 @@ Desktop builds are unsigned unless the release was made with signing secrets con
 Prerequisites:
 
 - Rust 1.95 or newer.
-- [Bun](https://bun.sh/).
+- [Node.js](https://nodejs.org/) (current LTS) with npm.
 - A C compiler. libjpeg is built from source via `mozjpeg-sys`; nasm is not required.
 - Tauri's platform prerequisites: see the [Tauri prerequisites guide](https://v2.tauri.app/start/prerequisites/).
 
 Commands:
 
 ```sh
-bun install
-bun tauri dev        # run the desktop app in development
-bun tauri build      # build a release bundle
+npm install
+npm run tauri dev    # run the desktop app in development
+npm run tauri build  # build a release bundle
 
 cargo test -p stegano-core --release
 cargo run -p stegano-cli -- --help
@@ -125,7 +136,7 @@ cargo run -p stegano-cli -- --help
 Android builds need the Android SDK and NDK, plus JDK 17:
 
 ```sh
-bun tauri android build --apk
+npm run tauri -- android build --apk
 ```
 
 ## Project layout
@@ -136,14 +147,17 @@ bun tauri android build --apk
 | `crates/stegano-cli` | The `stegano` command-line tool. |
 | `src-tauri` | Thin Tauri command layer. File I/O is in Rust, and Android content URIs are supported. |
 | `src` | Vue 3 user interface. |
-| `.github/workflows` | CI and release workflows. |
+| `.github/workflows` | Tag-triggered release workflow. |
 
-## CI and releases
+## Releases
 
-- **`ci.yml`** runs on pushes to `main` and on pull requests. It checks rustfmt, runs clippy with `-D warnings`, runs the core tests, builds the CLI, and type-checks and builds the frontend.
-- **`release.yml`** runs on `v*` tags or manually. It builds all platform bundles and CLI archives and attaches them to a **draft** GitHub release, which is published by hand. The tag must match the version in `src-tauri/tauri.conf.json`.
-- **Signing** is optional and set with repository secrets. macOS uses `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY`, plus `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` for notarization. Android uses `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Without them, desktop builds are unsigned and Android builds are debug-signed.
-- **Dependabot** keeps GitHub Actions, Cargo, and Bun dependencies up to date.
+The only workflow, `.github/workflows/release.yml`, runs when a `v*` tag is pushed. It builds all platform bundles and CLI archives and attaches them to a **draft** GitHub release, which is published by hand. The tag must match the version in `src-tauri/tauri.conf.json`:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+Signing is optional and set with repository secrets. macOS uses `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY`, plus `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` for notarization. Android uses `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Without them, desktop builds are unsigned and Android builds are debug-signed.
 
 ## Background
 

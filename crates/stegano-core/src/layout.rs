@@ -1,15 +1,21 @@
 //! How cover elements are split between the salt, the header and the body.
 //!
-//! 1. A *public* permutation (seeded only by the carrier format and size) picks
-//!    the salt segment. The salt is random, so reading it from any carrier,
-//!    stego or not, just yields noise.
-//! 2. The remaining elements are shuffled with a key derived from the
-//!    passphrase and salt, and split into the header and body segments.
+//! Elements are visited in a *segment order*: indices `0..salt_end` hold the
+//! salt, `salt_end..header_end` the header and the rest the body. Index `i`
+//! maps to a cover position as follows:
+//!
+//! 1. The salt segment uses a public affine scatter (golden-ratio stride), so
+//!    its positions are spread evenly over the cover. The salt is random, so
+//!    reading it from any carrier, stego or not, just yields noise.
+//! 2. Header and body indices first go through a keyed pseudorandom
+//!    permutation (indices sorted by ChaCha20 keystream tags, keyed from the
+//!    passphrase and salt), then through the same affine map.
 //!
 //! No segment has a fixed location, and nothing in the cover is plaintext.
 
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::crypto::{SALT_LEN, TAG_LEN};
@@ -39,48 +45,89 @@ pub(crate) fn body_capacity_bits(n: usize) -> usize {
     (body as f64 * MAX_BODY_RATE) as usize
 }
 
-/// All element positions in public-permutation order, plus where the salt
-/// segment ends. The caller shuffles `order[salt_end..]` with
-/// [`keyed_shuffle`] once it has the key; the header segment then follows the
-/// salt and the body takes the rest.
-pub(crate) fn public_order(n: usize, format_tag: &str) -> (Vec<u32>, usize) {
-    let mut h = Sha256::new();
-    h.update(b"stegano/v2/public");
-    h.update(format_tag.as_bytes());
-    h.update((n as u64).to_be_bytes());
-    let mut all: Vec<u32> = (0..n as u32).collect();
-    shuffle(&mut all, h.finalize().into());
-    (all, salt_segment_len(n))
+pub(crate) struct Layout {
+    n: u64,
+    pub salt_end: usize,
+    pub header_end: usize,
+    stride: u64,
+    offset: u64,
+    /// Keyed order of the non-salt indices (empty until a key is set).
+    keyed: Vec<u32>,
 }
 
-pub(crate) fn keyed_shuffle(tail: &mut [u32], key: &[u8; 32]) {
-    shuffle(tail, *key);
-}
-
-/// End of the header segment within the order returned by [`public_order`].
-pub(crate) fn header_end(n: usize) -> usize {
-    salt_segment_len(n) + header_segment_len(n)
-}
-
-/// Fisher-Yates driven only by ChaCha20 output words, so the permutation is
-/// identical on every platform and pointer width.
-pub(crate) fn shuffle(v: &mut [u32], seed: [u8; 32]) {
-    let mut rng = ChaCha20Rng::from_seed(seed);
-    for i in (1..v.len()).rev() {
-        let j = bounded(&mut rng, i as u32 + 1);
-        v.swap(i, j as usize);
-    }
-}
-
-/// Unbiased integer in `0..bound` (Lemire's method).
-fn bounded(rng: &mut ChaCha20Rng, bound: u32) -> u32 {
-    let threshold = bound.wrapping_neg() % bound;
-    loop {
-        let m = u64::from(rng.next_u32()) * u64::from(bound);
-        if (m as u32) >= threshold {
-            return (m >> 32) as u32;
+impl Layout {
+    /// Layout for `n` elements; only the salt segment is usable until
+    /// [`Layout::set_key`] is called.
+    pub fn new(n: usize, format_tag: &str) -> Self {
+        let mut h = Sha256::new();
+        h.update(b"stegano/v2/public");
+        h.update(format_tag.as_bytes());
+        h.update((n as u64).to_be_bytes());
+        let digest = h.finalize();
+        let n64 = n as u64;
+        // Golden-ratio stride, nudged to be coprime with n so the map is a bijection.
+        let mut stride = ((n64 as f64 * 0.618_033_988_749_895) as u64).max(1) | 1;
+        while gcd(stride, n64) != 1 {
+            stride += 2;
+        }
+        Layout {
+            n: n64,
+            salt_end: salt_segment_len(n),
+            header_end: salt_segment_len(n) + header_segment_len(n),
+            stride,
+            offset: u64::from_be_bytes(digest[..8].try_into().unwrap()) % n64,
+            keyed: Vec::new(),
         }
     }
+
+    pub fn set_key(&mut self, key: &[u8; 32]) {
+        self.keyed = keyed_order(key, self.n as usize - self.salt_end);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.n as usize
+    }
+
+    /// Cover position of segment-order index `i`.
+    pub fn position(&self, i: usize) -> usize {
+        let i = i as u64;
+        let j = if i < self.salt_end as u64 {
+            i
+        } else {
+            self.salt_end as u64 + self.keyed[(i - self.salt_end as u64) as usize] as u64
+        };
+        ((j as u128 * self.stride as u128 + self.offset as u128) % self.n as u128) as usize
+    }
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// A keyed pseudorandom permutation of `0..len`: every index gets a 32-bit
+/// tag from the ChaCha20 keystream (index `j` uses keystream word `j`), and
+/// indices are sorted by tag, ties broken by index. Sorting by pseudorandom
+/// tags gives a uniformly random permutation without the key; both steps run
+/// in parallel, since the keystream can be entered at any word.
+fn keyed_order(key: &[u8; 32], len: usize) -> Vec<u32> {
+    const CHUNK: usize = 1 << 16;
+    let mut tagged = vec![0u64; len];
+    tagged
+        .par_chunks_mut(CHUNK)
+        .enumerate()
+        .for_each(|(c, out)| {
+            let mut rng = ChaCha20Rng::from_seed(*key);
+            rng.set_word_pos((c * CHUNK) as u128);
+            for (k, slot) in out.iter_mut().enumerate() {
+                *slot = (u64::from(rng.next_u32()) << 32) | (c * CHUNK + k) as u64;
+            }
+        });
+    tagged.par_sort_unstable();
+    tagged.into_par_iter().map(|t| t as u32).collect()
 }
 
 pub(crate) fn to_bits(bytes: &[u8]) -> Vec<u8> {
@@ -100,29 +147,39 @@ pub(crate) fn from_bits(bits: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn segments_partition_the_cover() {
-        let n = 100_000;
-        let (mut all, salt_end) = public_order(n, "png");
-        keyed_shuffle(&mut all[salt_end..], &[3; 32]);
-        assert!(salt_end < header_end(n) && header_end(n) < n);
-        all.sort_unstable();
-        assert_eq!(all, (0..n as u32).collect::<Vec<_>>());
+    fn positions(layout: &Layout) -> Vec<usize> {
+        (0..layout.len()).map(|i| layout.position(i)).collect()
     }
 
     #[test]
-    fn shuffle_is_keyed_and_stable() {
-        let mut a: Vec<u32> = (0..1000).collect();
-        let mut b = a.clone();
-        let mut c = a.clone();
-        shuffle(&mut a, [1; 32]);
-        shuffle(&mut b, [1; 32]);
-        shuffle(&mut c, [2; 32]);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
+    fn layout_is_a_permutation() {
+        for n in [16_384, 100_000, 131_072, 1_000_003] {
+            let mut layout = Layout::new(n, "raster");
+            layout.set_key(&[3; 32]);
+            let mut all = positions(&layout);
+            all.sort_unstable();
+            assert!(all.iter().copied().eq(0..n), "n = {n}");
+            assert!(layout.salt_end < layout.header_end && layout.header_end < n);
+        }
+    }
+
+    #[test]
+    fn keyed_order_depends_on_key_only_past_the_salt() {
+        let n = 50_000;
+        let mut a = Layout::new(n, "pcm");
+        let mut b = Layout::new(n, "pcm");
+        a.set_key(&[1; 32]);
+        b.set_key(&[2; 32]);
+        let (pa, pb) = (positions(&a), positions(&b));
+        assert_eq!(pa[..a.salt_end], pb[..b.salt_end]);
+        assert_ne!(pa[a.salt_end..], pb[b.salt_end..]);
         // Pin the output so an accidental algorithm change (which would break
         // every existing stego file) fails loudly.
-        assert_eq!(&a[..6], &[385, 812, 291, 926, 200, 101]);
+        assert_eq!(&pa[..4], &[37_635, 18_536, 49_437, 30_338]);
+        assert_eq!(
+            &pa[a.salt_end..a.salt_end + 4],
+            &[17_585, 28_486, 4_071, 48_484]
+        );
     }
 
     #[test]

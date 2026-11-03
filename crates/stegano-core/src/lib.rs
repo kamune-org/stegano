@@ -27,13 +27,14 @@ mod layout;
 mod stc;
 
 use rand::{Rng, RngCore};
+use rayon::prelude::*;
 
 pub use carrier::{CarrierFormat, CarrierKind};
 pub use container::{Entry, EntryKind};
 pub use error::{Error, Result};
 
 use crypto::{Keys, SALT_LEN, TAG_LEN};
-use layout::{HEADER_LEN, HEADER_PLAIN_LEN, from_bits, to_bits};
+use layout::{HEADER_LEN, HEADER_PLAIN_LEN, Layout, from_bits, to_bits};
 
 const FORMAT_VERSION: u8 = 2;
 
@@ -146,7 +147,9 @@ pub fn embed(
     let mut rng = rand::thread_rng();
     let mut salt = [0u8; SALT_LEN];
     rng.fill_bytes(&mut salt);
-    let keys = Keys::derive(passphrase, &salt)?;
+    // Key derivation and cost computation are independent; overlap them.
+    let (keys, costs) = rayon::join(|| Keys::derive(passphrase, &salt), || carrier.costs());
+    let keys = keys?;
     let body = keys.seal_body(&container)?;
     let mut header = [0u8; HEADER_PLAIN_LEN];
     header[0] = FORMAT_VERSION;
@@ -154,53 +157,56 @@ pub fn embed(
     let header = keys.seal_header(&header)?;
     debug_assert_eq!(header.len(), HEADER_LEN);
 
-    let (mut order, salt_end) = layout::public_order(n, format.tag());
-    layout::keyed_shuffle(&mut order[salt_end..], &keys.permutation);
-    let header_end = layout::header_end(n);
+    let mut layout = Layout::new(n, format.tag());
+    layout.set_key(&keys.permutation);
 
-    // Gather costs and parities in embedding order once; drop the rest early.
-    let rho: Vec<f32> = {
-        let costs = carrier.costs();
-        order.iter().map(|&p| costs[p as usize]).collect()
-    };
+    // The segments use disjoint elements, so they embed independently. The
+    // salt and header are tiny but run the slowest trellis; overlap them with
+    // the body instead of leaving cores idle.
     let cover = carrier.cover_mut();
-    let x: Vec<u8> = order
-        .iter()
-        .map(|&p| parity(cover.values[p as usize]))
-        .collect();
-
-    let mut changed = 0;
-    for (range, bytes) in [
-        (0..salt_end, &salt[..]),
-        (salt_end..header_end, &header[..]),
-        (header_end..n, &body[..]),
-    ] {
-        let y = stc::embed(&x[range.clone()], &rho[range.clone()], &to_bits(bytes)).ok_or_else(
-            || {
-                Error::UnsuitableCarrier(
-                    "not enough noisy or textured area to hide this payload \
+    let values = &cover.values;
+    let segments = [
+        (0..layout.salt_end, &salt[..]),
+        (layout.salt_end..layout.header_end, &header[..]),
+        (layout.header_end..n, &body[..]),
+    ];
+    let flips = segments
+        .into_par_iter()
+        .map(|(segment, bytes)| {
+            let changes = stc::embed(segment.len(), &to_bits(bytes), |j| {
+                let p = layout.position(segment.start + j);
+                (parity(values[p]), costs[p])
+            })?;
+            Some(
+                changes
+                    .into_iter()
+                    .map(|j| layout.position(segment.start + j))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            Error::UnsuitableCarrier(
+                "not enough noisy or textured area to hide this payload \
                  (large flat areas, transparency or silence can't be used)"
-                        .into(),
-                )
-            },
-        )?;
-        for ((&p, &a), b) in order[range.clone()].iter().zip(&x[range]).zip(y) {
-            if a != b {
-                let v = &mut cover.values[p as usize];
-                *v = if *v <= cover.lo {
-                    *v + 1
-                } else if *v >= cover.hi {
-                    *v - 1
-                } else if rng.r#gen() {
-                    *v + 1
-                } else {
-                    *v - 1
-                };
-                changed += 1;
-            }
-        }
+                    .into(),
+            )
+        })?
+        .concat();
+    drop(costs);
+
+    for &p in &flips {
+        let v = &mut cover.values[p];
+        *v = if *v <= cover.lo {
+            *v + 1
+        } else if *v >= cover.hi {
+            *v - 1
+        } else if rng.r#gen() {
+            *v + 1
+        } else {
+            *v - 1
+        };
     }
-    drop((order, rho, x));
 
     let out = carrier.encode()?;
     // Re-read the output to make sure the codec preserved every element.
@@ -218,7 +224,7 @@ pub fn embed(
         report: EmbedReport {
             embedded_bytes: body.len(),
             elements: n,
-            changed,
+            changed: flips.len(),
             capacity,
             recommended,
         },
@@ -227,28 +233,26 @@ pub fn embed(
 
 pub fn extract(data: &[u8], passphrase: &str) -> Result<Vec<Entry>> {
     let carrier = carrier::open(data)?;
-    let n = carrier.cover().values.len();
+    let values = &carrier.cover().values;
+    let n = values.len();
     if n < layout::MIN_ELEMENTS {
         return Err(Error::NotFound);
     }
-    let (mut order, salt_end) = layout::public_order(n, carrier.format().tag());
-    let header_end = layout::header_end(n);
-    let parities = |range: std::ops::Range<usize>, order: &[u32]| -> Vec<u8> {
-        let values = &carrier.cover().values;
-        order[range]
-            .iter()
-            .map(|&p| parity(values[p as usize]))
-            .collect()
+    let mut layout = Layout::new(n, carrier.format().tag());
+    let read = |layout: &Layout, segment: std::ops::Range<usize>, bytes: usize| {
+        from_bits(&stc::extract(segment.len(), bytes * 8, |j| {
+            parity(values[layout.position(segment.start + j)])
+        }))
     };
-    let read = |y: Vec<u8>, bytes: usize| from_bits(&stc::extract(&y, bytes * 8));
 
-    let salt: [u8; SALT_LEN] = read(parities(0..salt_end, &order), SALT_LEN)
+    let salt: [u8; SALT_LEN] = read(&layout, 0..layout.salt_end, SALT_LEN)
         .try_into()
         .unwrap();
     let keys = Keys::derive(passphrase, &salt)?;
-    layout::keyed_shuffle(&mut order[salt_end..], &keys.permutation);
+    layout.set_key(&keys.permutation);
 
-    let header = keys.open_header(&read(parities(salt_end..header_end, &order), HEADER_LEN))?;
+    let header_at = layout.salt_end..layout.header_end;
+    let header = keys.open_header(&read(&layout, header_at, HEADER_LEN))?;
     if header[0] != FORMAT_VERSION {
         return Err(Error::Corrupt(format!(
             "unsupported format version {}",
@@ -256,12 +260,12 @@ pub fn extract(data: &[u8], passphrase: &str) -> Result<Vec<Entry>> {
         )));
     }
     let body_len = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
-    if body_len * 8 > n - header_end {
+    if body_len * 8 > n - layout.header_end {
         return Err(Error::Corrupt(
             "declared payload is larger than the carrier".into(),
         ));
     }
-    let body = read(parities(header_end..n, &order), body_len);
+    let body = read(&layout, layout.header_end..n, body_len);
     let container = keys
         .open_body(&body)
         .map_err(|_| Error::Corrupt("the carrier was modified after the data was hidden".into()))?;
