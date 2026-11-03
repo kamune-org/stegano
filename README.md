@@ -170,7 +170,7 @@ cargo run -p stegano-cli -- --help
 Android builds need the Android SDK and NDK, plus JDK 17:
 
 ```sh
-npm run tauri -- android build --apk
+npm run tauri -- android build --apk true
 ```
 
 ## Project layout

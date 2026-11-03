@@ -184,11 +184,12 @@ jobs:
           New-Item -ItemType Directory -Force out | Out-Null
           Compress-Archive -Path target/release/stegano.exe -DestinationPath "out/stegano-cli-${{ matrix.name }}.zip"
 
-      - uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.create-release.outputs.tag }}
-          draft: true
-          files: out/*
+      # Upload only; never edits the release itself.
+      - name: Upload to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.create-release.outputs.tag }}" out/* --clobber -R "$GITHUB_REPOSITORY"
 
   android:
     name: Android
@@ -256,7 +257,7 @@ jobs:
           fi
 
       - name: Build APK and AAB
-        run: npm run tauri -- android build --apk --aab
+        run: npm run tauri -- android build --apk true --aab true
 
       - name: Collect artifacts
         run: |
@@ -274,8 +275,9 @@ jobs:
           path: out/*
           if-no-files-found: error
 
-      - uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.create-release.outputs.tag }}
-          draft: true
-          files: out/*
+      # Upload only; never edits the release itself.
+      - name: Upload to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.create-release.outputs.tag }}" out/* --clobber -R "$GITHUB_REPOSITORY"
