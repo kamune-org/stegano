@@ -58,15 +58,16 @@ As a sanity check, Sample Pair Analysis (a classic LSB detector) estimates a 51%
 
 ## Performance
 
-On an Apple M4 Pro (release build), with a 100 KB payload:
+On an Apple M4 Pro (release build), with a 100 KB payload (median of 5 runs):
 
 | Carrier | Hide | Reveal |
 | --- | --- | --- |
-| 8 MP JPEG | 1.2 s | 0.3 s |
-| 8 MP PNG | 0.8 s | 0.3 s |
-| 36 MP PNG | 2.7 s | — |
+| 8 MP JPEG | 0.84 s | 0.30 s |
+| 8 MP PNG | 0.81 s | 0.31 s |
+| 36 MP JPEG | 1.40 s | 0.56 s |
+| 36 MP PNG | 2.46 s | 1.04 s |
 
-Argon2id itself takes about 70 ms; the rest is spread across all cores with `rayon` (cost maps, the keyed permutation, which is a parallel sort by ChaCha20 tags, and STC, which runs in independent chunks and segments). Debug builds (`npm run tauri dev`) optimize dependencies too, so they are only modestly slower.
+Argon2id itself takes about 70 ms; the rest is spread across all cores with `rayon` (cost maps, the keyed permutation, which is a parallel sort by ChaCha20 tags, and STC, which runs in independent chunks and segments). Debug builds (`npm run tauri dev`) optimize dependencies too, so they are only modestly slower. See [docs/performance.md](docs/performance.md) for the full report and before/after numbers.
 
 ## Capacity
 
@@ -86,7 +87,7 @@ Example, a 3840×2160 photo:
 
 - **No steganography is undetectable.** Stay under the recommended size, and use carriers you have the only copy of (your own fresh photos), not images downloaded from the web.
 - **Recompression destroys the data.** Messengers, social networks, and email clients that "optimise" images re-encode media and remove the hidden data. Send the output as a file or document.
-- **Memory use is high.** Hiding in an 8 MP image needs about 1 GB of RAM; revealing about 0.6 GB.
+- **Memory use is high.** Hiding in an 8 MP image needs about 1 GB of RAM; revealing about 0.55 GB.
 
 ## Command-line tool
 
@@ -148,6 +149,7 @@ npm run tauri -- android build --apk
 | `src-tauri` | Thin Tauri command layer. File I/O is in Rust, and Android content URIs are supported. |
 | `src` | Vue 3 user interface. |
 | `.github/workflows` | Tag-triggered release workflow. |
+| `docs` | Android signing guide and performance report. |
 
 ## Releases
 
@@ -157,7 +159,7 @@ The only workflow, `.github/workflows/release.yml`, runs when a `v*` tag is push
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-Signing is optional and set with repository secrets. macOS uses `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY`, plus `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` for notarization. Android uses `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Without them, desktop builds are unsigned and Android builds are debug-signed.
+Signing is optional and set with repository secrets; [docs/android-signing.md](docs/android-signing.md) has step-by-step commands for the Android key. macOS uses `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY`, plus `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` for notarization. Android uses `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Without them, desktop builds are unsigned and Android builds are debug-signed.
 
 ## Background
 
