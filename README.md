@@ -89,6 +89,39 @@ Example, a 3840×2160 photo:
 - **Recompression destroys the data.** Messengers, social networks, and email clients that "optimise" images re-encode media and remove the hidden data. Send the output as a file or document.
 - **Memory use is high.** Hiding in an 8 MP image needs about 1 GB of RAM; revealing about 0.55 GB.
 
+## Possible future features
+
+Ideas for later versions, roughly grouped. None of these are planned or promised.
+
+**Security and stealth**
+
+- **Decoy payloads (plausible deniability):** a second passphrase that reveals harmless content, so being forced to hand over "the" passphrase doesn't expose the real payload.
+- **Public-key mode:** hide data for a recipient's X25519 public key (for example, compatible with [age](https://age-encryption.org/)) instead of a shared passphrase.
+- **Split a payload across several carriers** with k-of-n secret sharing, so no single file holds the whole message and losing some files is survivable.
+- **Stronger cost functions:** J-UNIWARD or GFR for JPEG, MiPOD or S-UNIWARD for pixels, and multi-level (±1/±2) STC for higher embedding efficiency.
+- **Side-informed JPEG embedding:** when the source is a RAW or uncompressed photo, use the rounding errors from compressing it ourselves to make changes even harder to detect.
+- **Built-in risk check:** run classic detectors (SPA, RS) and possibly a small learned detector on the output, and warn before saving if it looks suspicious.
+
+**Carriers**
+
+- **HEIC/AVIF**, the default photo format on iPhones and many Android phones.
+- **Compressed audio** (MP3, AAC, Opus), embedding in the codec's quantized values the way JPEG support works.
+- **Lossy WebP** through its DCT coefficients, as JPEG does today.
+- **Palette images** (GIF, indexed PNG) with palette-aware embedding instead of refusing them.
+
+**Apps and platforms**
+
+- **iOS build** (Tauri supports it) and share-sheet integration on Android and iOS.
+- **Batch mode and drag-and-drop:** hide or reveal several files at once.
+- **A WebAssembly build of the core** for a browser-only version that never uploads files.
+- **Signed Windows builds and an auto-updater** for desktop releases.
+
+**Engineering**
+
+- **Lower memory use:** an in-place radix sort for the keyed order, streaming the cover in chunks, and 16-bit element storage, to make large photos comfortable on phones.
+- **Fuzzing** of the carrier parsers and the container decoder with `cargo-fuzz`, since they read untrusted files.
+- **zstd compression** as an option alongside DEFLATE for better ratios on larger payloads.
+
 ## Command-line tool
 
 The CLI binary is `stegano`, from the `crates/stegano-cli` crate.
