@@ -24,31 +24,38 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
-    signingConfigs {
-        create("release") {
-            // Read raw store file path from project properties or env, with fallback.
-            val storeFilePathRaw = (project.findProperty("MY_STORE_FILE") as String?)
-                ?: System.getenv("MY_STORE_FILE")
-                ?: "src-tauri/keystore/Kamune-ORG.jks"
+    // Release signing is optional: it is only applied when a keystore file exists and
+    // a store password is provided (Gradle properties or env vars). Otherwise the
+    // release build is left unsigned instead of failing.
+    fun signingValue(name: String): String? =
+        (project.findProperty(name) as String?)?.takeIf { it.isNotBlank() }
+            ?: System.getenv(name)?.takeIf { it.isNotBlank() }
 
-            val storeFilePath = if (storeFilePathRaw.startsWith("~")) {
-                System.getProperty("user.home") + storeFilePathRaw.removePrefix("~")
-            } else {
-                storeFilePathRaw
-            }
-
-            storeFile = file(storeFilePath)
-
-            storePassword = (project.findProperty("MY_STORE_PASSWORD") as String?)
-                ?: System.getenv("MY_STORE_PASSWORD")
-
-            keyAlias = (project.findProperty("MY_KEY_ALIAS") as String?)
-                ?: System.getenv("MY_KEY_ALIAS")
-                ?: "stegano"
-
-            keyPassword = (project.findProperty("MY_KEY_PASSWORD") as String?)
-                ?: System.getenv("MY_KEY_PASSWORD")
+    val releaseStoreFile: File? = run {
+        val raw = signingValue("MY_STORE_FILE")
+            // Local-dev default: src-tauri/keystore/Kamune-ORG.jks (git-ignored).
+            ?: rootProject.file("../../keystore/Kamune-ORG.jks").path
+        val path = if (raw.startsWith("~")) {
+            System.getProperty("user.home") + raw.removePrefix("~")
+        } else {
+            raw
         }
+        file(path).takeIf { it.isFile }
+    }
+    val releaseStorePassword = signingValue("MY_STORE_PASSWORD")
+    val canSignRelease = releaseStoreFile != null && releaseStorePassword != null
+
+    if (canSignRelease) {
+        signingConfigs {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = signingValue("MY_KEY_ALIAS") ?: "stegano"
+                keyPassword = signingValue("MY_KEY_PASSWORD") ?: releaseStorePassword
+            }
+        }
+    } else {
+        logger.warn("Release keystore or MY_STORE_PASSWORD not found; signing release with the debug key.")
     }
     buildTypes {
         getByName("debug") {
@@ -64,7 +71,9 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName("release")
+            // Without a release keystore, fall back to the debug key so CI APKs can
+            // still be sideloaded for testing (not suitable for Play Store uploads).
+            signingConfig = signingConfigs.getByName(if (canSignRelease) "release" else "debug")
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))

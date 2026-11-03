@@ -1,0 +1,276 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Creates the draft release once, so the parallel build jobs below only upload to it
+  # (avoids the duplicate-release race when several jobs try to create the same tag).
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and version
+        id: meta
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            if [ "$tag" != "v$version" ]; then
+              echo "::error::Tag $tag does not match tauri.conf.json version v$version"
+              exit 1
+            fi
+          else
+            tag="v$version"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release if missing
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # Drafts are not reachable by tag, so look the id up in the release list.
+          find_id() {
+            gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+              --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -n1
+          }
+          id=$(find_id)
+          if [ -z "$id" ]; then
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" \
+              --title "Stegano v$VERSION" --generate-notes
+            id=$(find_id)
+          fi
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Desktop (${{ matrix.name }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (universal)
+            platform: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - name: Windows
+            platform: windows-latest
+            rust_targets: ""
+            args: ""
+          - name: Linux
+            platform: ubuntu-22.04
+            rust_targets: ""
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: bun install --frozen-lockfile
+
+      # Only export signing variables that are actually set: empty values make
+      # Tauri attempt (and fail) to sign/notarize.
+      - name: Configure macOS signing (optional)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          export_if_set() {
+            if [ -n "${!1}" ]; then
+              echo "::add-mask::${!1}"
+              echo "$1=${!1}" >> "$GITHUB_ENV"
+            fi
+          }
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            export_if_set APPLE_CERTIFICATE
+            export_if_set APPLE_CERTIFICATE_PASSWORD
+            export_if_set APPLE_SIGNING_IDENTITY
+            # Notarization additionally needs the Apple ID credentials.
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              export_if_set APPLE_ID
+              export_if_set APPLE_PASSWORD
+              export_if_set APPLE_TEAM_ID
+            fi
+          else
+            echo "Apple signing secrets not set; building unsigned."
+          fi
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: bun tauri
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}
+
+  cli:
+    name: CLI (${{ matrix.name }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            platform: ubuntu-latest
+          - name: macos-aarch64
+            platform: macos-latest
+          - name: windows-x86_64
+            platform: windows-latest
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli
+
+      - name: Build
+        run: cargo build --release -p stegano-cli
+
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p out
+          tar -C target/release -czf "out/stegano-cli-${{ matrix.name }}.tar.gz" stegano
+
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path target/release/stegano.exe -DestinationPath "out/stegano-cli-${{ matrix.name }}.zip"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          draft: true
+          files: out/*
+
+  android:
+    name: Android
+    needs: create-release
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 27.2.12479018
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform, build-tools and NDK
+        run: |
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - run: bun install --frozen-lockfile
+
+      # Without these secrets the build.gradle.kts leaves the release unsigned.
+      - name: Configure Android signing (optional)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "::add-mask::$KEYSTORE_PASSWORD"
+            {
+              echo "MY_STORE_FILE=$RUNNER_TEMP/release.jks"
+              echo "MY_STORE_PASSWORD=$KEYSTORE_PASSWORD"
+            } >> "$GITHUB_ENV"
+            if [ -n "$KEY_ALIAS" ]; then echo "MY_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"; fi
+            if [ -n "$KEY_PASSWORD" ]; then
+              echo "::add-mask::$KEY_PASSWORD"
+              echo "MY_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "Android keystore secrets not set; building unsigned."
+          fi
+
+      - name: Build APK and AAB
+        run: bun tauri android build --apk --aab
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          find src-tauri/gen/android/app/build/outputs \( -name '*.apk' -o -name '*.aab' \) -print
+          find src-tauri/gen/android/app/build/outputs \( -name '*.apk' -o -name '*.aab' \) -print0 |
+            while IFS= read -r -d '' f; do
+              cp "$f" "out/stegano-${{ needs.create-release.outputs.version }}-$(basename "$f")"
+            done
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: out/*
+          if-no-files-found: error
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          draft: true
+          files: out/*
