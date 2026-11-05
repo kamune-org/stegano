@@ -75,13 +75,13 @@ impl Keys {
 }
 
 fn seal(key: &[u8; 32], aad: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
-    ChaCha20Poly1305::new(Key::from_slice(key))
+    ChaCha20Poly1305::new(&Key::from(*key))
         .encrypt(&Nonce::default(), Payload { msg, aad })
         .map_err(|_| Error::Internal("encryption failed".into()))
 }
 
 fn open(key: &[u8; 32], aad: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
-    ChaCha20Poly1305::new(Key::from_slice(key))
+    ChaCha20Poly1305::new(&Key::from(*key))
         .decrypt(&Nonce::default(), Payload { msg, aad })
         .map_err(|_| Error::NotFound)
 }

@@ -30,6 +30,9 @@ pub enum Error {
     #[error("invalid payload: {0}")]
     InvalidPayload(String),
 
+    #[error("cancelled")]
+    Cancelled,
+
     #[error("internal error: {0}")]
     Internal(String),
 }

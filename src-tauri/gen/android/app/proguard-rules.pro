@@ -19,3 +19,9 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# App picker plugin. Release minify is on; reflection finds @Command methods.
+-keepattributes RuntimeVisibleAnnotations
+-keep class com.kamune_org.stegano.PickerPlugin { *; }
+-keep class com.kamune_org.stegano.PickFilesArgs { *; }
+-keep class com.kamune_org.stegano.PickSaveArgs { *; }

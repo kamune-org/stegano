@@ -14,7 +14,7 @@
 //! No segment has a fixed location, and nothing in the cover is plaintext.
 
 use rand_chacha::ChaCha20Rng;
-use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rand_chacha::rand_core::{Rng, SeedableRng};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 

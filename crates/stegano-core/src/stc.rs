@@ -12,11 +12,56 @@
 //! bound the Viterbi path memory to a few MiB per chunk.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rand_chacha::ChaCha20Rng;
-use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rand_chacha::rand_core::{Rng, SeedableRng};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+
+/// Cancellation and batched progress for one STC call.
+///
+/// `on_blocks` receives how many message bits finished since the previous
+/// call: every [`BIT_BATCH`] bits, then the remainder. The cancel flag is
+/// loaded on that same cadence. When both fields are `None` the trellis loop
+/// does neither, which is the CLI path.
+#[derive(Copy, Clone)]
+pub(crate) struct StcOpts<'a> {
+    pub cancel: Option<&'a AtomicBool>,
+    /// Called with the number of message bits just finished.
+    pub on_blocks: Option<&'a (dyn Fn(usize) + Sync)>,
+}
+
+impl StcOpts<'static> {
+    #[allow(dead_code)] // used by the crate tests; embed builds its own opts
+    pub(crate) fn none() -> Self {
+        Self {
+            cancel: None,
+            on_blocks: None,
+        }
+    }
+}
+
+/// Message bits per progress callback and cancel poll.
+const BIT_BATCH: usize = 1024;
+
+#[inline(always)]
+fn report_blocks(opts: &StcOpts<'_>, n: usize) {
+    if let Some(on_blocks) = opts.on_blocks {
+        on_blocks(n);
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum StcError {
+    /// The message only fits by changing an infinite-cost element.
+    Wet,
+    Cancelled,
+}
+
+fn cancelled(flag: Option<&AtomicBool>) -> bool {
+    flag.is_some_and(|f| f.load(Ordering::Relaxed))
+}
 
 /// Viterbi path memory per chunk, in bits (8 MiB).
 const PATH_BITS_PER_CHUNK: usize = 1 << 26;
@@ -75,65 +120,110 @@ fn block(i: usize, n: usize, m: usize) -> Range<usize> {
 /// Embed `msg` into `n` cover elements, choosing the cheapest changes.
 /// `element(j)` returns the parity bit and change cost of element `j`; it is
 /// called from worker threads, chunk by chunk. Returns the (sorted) indices of
-/// the elements whose parity must flip, or `None` if the message can only be
-/// embedded by touching elements with infinite cost.
+/// the elements whose parity must flip, or [`StcError::Wet`] if the message can
+/// only be embedded by touching elements with infinite cost.
 pub(crate) fn embed(
     n: usize,
     msg: &[u8],
     element: impl Fn(usize) -> (u8, f32) + Sync,
-) -> Option<Vec<usize>> {
+    opts: &StcOpts<'_>,
+) -> Result<Vec<usize>, StcError> {
     assert!(msg.len() <= n);
     let plan = plan(n, msg.len());
     let parts = plan
         .chunks
         .par_iter()
         .map(|c| {
+            if cancelled(opts.cancel) {
+                return Err(StcError::Cancelled);
+            }
             let (x, rho): (Vec<u8>, Vec<f32>) = c.cols.clone().map(&element).unzip();
-            let y = viterbi(&x, &rho, &msg[c.bits.clone()], plan.h)?;
-            Some(
-                (0..x.len())
-                    .filter(|&j| x[j] != y[j])
-                    .map(|j| c.cols.start + j)
-                    .collect::<Vec<_>>(),
-            )
+            let y = viterbi(&x, &rho, &msg[c.bits.clone()], plan.h, opts)?;
+            Ok((0..x.len())
+                .filter(|&j| x[j] != y[j])
+                .map(|j| c.cols.start + j)
+                .collect::<Vec<_>>())
         })
-        .collect::<Option<Vec<_>>>()?;
-    Some(parts.concat())
+        .collect::<Result<Vec<_>, StcError>>()?;
+    Ok(parts.concat())
 }
 
 /// Read `m` message bits back out of `n` elements, given each one's parity.
-pub(crate) fn extract(n: usize, m: usize, parity: impl Fn(usize) -> u8 + Sync) -> Vec<u8> {
+pub(crate) fn extract(
+    n: usize,
+    m: usize,
+    parity: impl Fn(usize) -> u8 + Sync,
+    opts: &StcOpts<'_>,
+) -> Result<Vec<u8>, StcError> {
     let plan = plan(n, m);
-    plan.chunks
+    let parts = plan
+        .chunks
         .par_iter()
         .map(|c| {
+            if cancelled(opts.cancel) {
+                return Err(StcError::Cancelled);
+            }
             let y: Vec<u8> = c.cols.clone().map(&parity).collect();
-            syndrome(&y, c.bits.len(), plan.h)
+            syndrome(&y, c.bits.len(), plan.h, opts)
         })
-        .collect::<Vec<_>>()
-        .concat()
+        .collect::<Result<Vec<_>, StcError>>()?;
+    Ok(parts.concat())
 }
 
-fn syndrome(y: &[u8], m: usize, h: u32) -> Vec<u8> {
+fn syndrome(y: &[u8], m: usize, h: u32, opts: &StcOpts<'_>) -> Result<Vec<u8>, StcError> {
     if m == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let n = y.len();
     let hhat = submatrix(h, n.div_ceil(m));
     let mut window = 0u32;
     let mut out = Vec::with_capacity(m);
-    for i in 0..m {
-        let mask = row_mask(h, m - i);
-        let cols = block(i, n, m);
-        for (j, &bit) in y[cols.clone()].iter().enumerate() {
-            if bit == 1 {
-                window ^= hhat[j] & mask;
-            }
+    // No flag and no callback: the original per-bit loop, with nothing extra.
+    if opts.cancel.is_none() && opts.on_blocks.is_none() {
+        for i in 0..m {
+            window = syndrome_bit(y, &hhat, h, n, m, i, window, &mut out);
         }
-        out.push((window & 1) as u8);
-        window >>= 1;
+        return Ok(out);
     }
-    out
+    let mut pending = 0usize;
+    for i in 0..m {
+        if pending == 0 && cancelled(opts.cancel) {
+            return Err(StcError::Cancelled);
+        }
+        window = syndrome_bit(y, &hhat, h, n, m, i, window, &mut out);
+        pending += 1;
+        if pending == BIT_BATCH {
+            report_blocks(opts, pending);
+            pending = 0;
+        }
+    }
+    if pending > 0 {
+        report_blocks(opts, pending);
+    }
+    Ok(out)
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn syndrome_bit(
+    y: &[u8],
+    hhat: &[u32],
+    h: u32,
+    n: usize,
+    m: usize,
+    i: usize,
+    mut window: u32,
+    out: &mut Vec<u8>,
+) -> u32 {
+    let mask = row_mask(h, m - i);
+    let cols = block(i, n, m);
+    for (j, &bit) in y[cols].iter().enumerate() {
+        if bit == 1 {
+            window ^= hhat[j] & mask;
+        }
+    }
+    out.push((window & 1) as u8);
+    window >> 1
 }
 
 /// Near the end of the message the band runs off the bottom of `H`.
@@ -146,10 +236,16 @@ fn row_mask(h: u32, rows_left: usize) -> u32 {
     }
 }
 
-fn viterbi(x: &[u8], rho: &[f32], msg: &[u8], h: u32) -> Option<Vec<u8>> {
+fn viterbi(
+    x: &[u8],
+    rho: &[f32],
+    msg: &[u8],
+    h: u32,
+    opts: &StcOpts<'_>,
+) -> Result<Vec<u8>, StcError> {
     let (n, m) = (x.len(), msg.len());
     if m == 0 {
-        return Some(x.to_vec());
+        return Ok(x.to_vec());
     }
     let hhat = submatrix(h, n.div_ceil(m));
     let states = 1usize << h;
@@ -160,59 +256,41 @@ fn viterbi(x: &[u8], rho: &[f32], msg: &[u8], h: u32) -> Option<Vec<u8>> {
     let mut next = vec![0f32; states];
     cost[0] = 0.0;
 
-    for (i, &bit) in msg.iter().enumerate() {
-        let mask = row_mask(h, m - i);
-        let cols = block(i, n, m);
-        for j in cols.clone() {
-            let col = (hhat[j - cols.start] & mask) as usize;
-            // Cost of making the stego bit 0 or 1.
-            let (c0, c1) = if x[j] == 0 {
-                (0.0, rho[j])
-            } else {
-                (rho[j], 0.0)
-            };
-            let p = &mut path[j * groups..(j + 1) * groups];
-            let hi = col & !(LANES - 1);
-            // Monomorphize on the low bits of `col` so the in-group shuffle is
-            // a constant and the loop vectorizes.
-            match col & (LANES - 1) {
-                0 => acs::<0>(&cost, &mut next, p, hi, c0, c1),
-                1 => acs::<1>(&cost, &mut next, p, hi, c0, c1),
-                2 => acs::<2>(&cost, &mut next, p, hi, c0, c1),
-                3 => acs::<3>(&cost, &mut next, p, hi, c0, c1),
-                4 => acs::<4>(&cost, &mut next, p, hi, c0, c1),
-                5 => acs::<5>(&cost, &mut next, p, hi, c0, c1),
-                6 => acs::<6>(&cost, &mut next, p, hi, c0, c1),
-                _ => acs::<7>(&cost, &mut next, p, hi, c0, c1),
+    // No flag and no callback: same column loop as before, no per-bit poll.
+    if opts.cancel.is_none() && opts.on_blocks.is_none() {
+        for (i, &bit) in msg.iter().enumerate() {
+            advance_bit(
+                i, bit, n, m, h, &hhat, x, rho, groups, states, &mut path, &mut cost, &mut next,
+            )?;
+        }
+    } else {
+        let mut pending = 0usize;
+        for (i, &bit) in msg.iter().enumerate() {
+            if pending == 0 && cancelled(opts.cancel) {
+                return Err(StcError::Cancelled);
             }
-            std::mem::swap(&mut cost, &mut next);
+            advance_bit(
+                i, bit, n, m, h, &hhat, x, rho, groups, states, &mut path, &mut cost, &mut next,
+            )?;
+            pending += 1;
+            if pending == BIT_BATCH {
+                report_blocks(opts, pending);
+                pending = 0;
+            }
         }
-
-        // Row i leaves the window; only states whose low bit matches msg[i] survive.
-        let bit = bit as usize;
-        let mut floor = f32::INFINITY;
-        for s in 0..states / 2 {
-            next[s] = cost[(s << 1) | bit];
-            floor = floor.min(next[s]);
+        if pending > 0 {
+            report_blocks(opts, pending);
         }
-        next[states / 2..].fill(f32::INFINITY);
-        if !floor.is_finite() {
-            return None;
-        }
-        // Renormalize so accumulated costs stay within f32 precision.
-        for c in &mut next[..states / 2] {
-            *c -= floor;
-        }
-        std::mem::swap(&mut cost, &mut next);
     }
 
     let (mut state, best) = cost
         .iter()
         .enumerate()
         .min_by(|a, b| a.1.total_cmp(b.1))
-        .map(|(s, &c)| (s, c))?;
+        .map(|(s, &c)| (s, c))
+        .ok_or(StcError::Wet)?;
     if !best.is_finite() {
-        return None;
+        return Err(StcError::Wet);
     }
 
     let mut y = vec![0u8; n];
@@ -229,7 +307,71 @@ fn viterbi(x: &[u8], rho: &[f32], msg: &[u8], h: u32) -> Option<Vec<u8>> {
         }
     }
     debug_assert_eq!(state, 0);
-    Some(y)
+    Ok(y)
+}
+
+/// One message bit: ACS across its columns, then shift that bit out of the window.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn advance_bit(
+    i: usize,
+    bit: u8,
+    n: usize,
+    m: usize,
+    h: u32,
+    hhat: &[u32],
+    x: &[u8],
+    rho: &[f32],
+    groups: usize,
+    states: usize,
+    path: &mut [u8],
+    cost: &mut Vec<f32>,
+    next: &mut Vec<f32>,
+) -> Result<(), StcError> {
+    let mask = row_mask(h, m - i);
+    let cols = block(i, n, m);
+    for j in cols.clone() {
+        let col = (hhat[j - cols.start] & mask) as usize;
+        // Cost of making the stego bit 0 or 1.
+        let (c0, c1) = if x[j] == 0 {
+            (0.0, rho[j])
+        } else {
+            (rho[j], 0.0)
+        };
+        let p = &mut path[j * groups..(j + 1) * groups];
+        let hi = col & !(LANES - 1);
+        // Monomorphize on the low bits of `col` so the in-group shuffle is
+        // a constant and the loop vectorizes.
+        match col & (LANES - 1) {
+            0 => acs::<0>(cost, next, p, hi, c0, c1),
+            1 => acs::<1>(cost, next, p, hi, c0, c1),
+            2 => acs::<2>(cost, next, p, hi, c0, c1),
+            3 => acs::<3>(cost, next, p, hi, c0, c1),
+            4 => acs::<4>(cost, next, p, hi, c0, c1),
+            5 => acs::<5>(cost, next, p, hi, c0, c1),
+            6 => acs::<6>(cost, next, p, hi, c0, c1),
+            _ => acs::<7>(cost, next, p, hi, c0, c1),
+        }
+        std::mem::swap(cost, next);
+    }
+
+    // Row i leaves the window; only states whose low bit matches msg[i] survive.
+    let bit = bit as usize;
+    let mut floor = f32::INFINITY;
+    for s in 0..states / 2 {
+        next[s] = cost[(s << 1) | bit];
+        floor = floor.min(next[s]);
+    }
+    next[states / 2..].fill(f32::INFINITY);
+    if !floor.is_finite() {
+        return Err(StcError::Wet);
+    }
+    // Renormalize so accumulated costs stay within f32 precision.
+    for c in &mut next[..states / 2] {
+        *c -= floor;
+    }
+    std::mem::swap(cost, next);
+    Ok(())
 }
 
 const LANES: usize = 8;
@@ -272,10 +414,10 @@ fn acs<const LO: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
 
     fn stego_bits(cover: &[u8], costs: &[f32], msg: &[u8]) -> Option<Vec<u8>> {
-        let flips = embed(cover.len(), msg, |j| (cover[j], costs[j]))?;
+        let flips = embed(cover.len(), msg, |j| (cover[j], costs[j]), &StcOpts::none()).ok()?;
         let mut y = cover.to_vec();
         for j in flips {
             y[j] ^= 1;
@@ -284,14 +426,14 @@ mod tests {
     }
 
     fn read(y: &[u8], m: usize) -> Vec<u8> {
-        extract(y.len(), m, |j| y[j])
+        extract(y.len(), m, |j| y[j], &StcOpts::none()).unwrap()
     }
 
     fn random_case(n: usize, m: usize, seed: u64) -> (Vec<u8>, Vec<f32>, Vec<u8>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let cover = (0..n).map(|_| rng.r#gen::<u8>() & 1).collect();
-        let costs = (0..n).map(|_| rng.gen_range(0.1f32..10.0)).collect();
-        let msg = (0..m).map(|_| rng.r#gen::<u8>() & 1).collect();
+        let cover = (0..n).map(|_| rng.random::<u8>() & 1).collect();
+        let costs = (0..n).map(|_| rng.random_range(0.1f32..10.0)).collect();
+        let msg = (0..m).map(|_| rng.random::<u8>() & 1).collect();
         (cover, costs, msg)
     }
 

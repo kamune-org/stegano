@@ -9,23 +9,23 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff", "webp"] }
-hound = "3.5"
-claxon = "0.4"
-flacenc = { version = "0.4", default-features = false, features = ["par"] }
-mozjpeg-sys = { version = "2", default-features = false, features = ["unwinding"] }
-libc = "0.2"
-png = "0.18"
-chacha20poly1305 = "0.10"
-argon2 = "0.5"
-hkdf = "0.12"
-sha2 = "0.10"
-rand = "0.8"
-rand_chacha = "0.3"
-rayon = "1.10"
-zeroize = { version = "1.7", features = ["derive"] }
-miniz_oxide = "0.8"
-thiserror = "2"
+image = { version = "0.25.10", default-features = false, features = ["png", "bmp", "tiff", "webp"] }
+hound = "3.5.1"
+claxon = "0.4.3"
+flacenc = { version = "0.5.1", default-features = false, features = ["par"] }
+mozjpeg-sys = { version = "2.2.3", default-features = false, features = ["unwinding"] }
+libc = "0.2.191"
+png = "0.18.1"
+chacha20poly1305 = "0.11.0"
+argon2 = "0.6.0"
+hkdf = "0.13.0"
+sha2 = "0.11.1"
+rand = "0.10.3"
+rand_chacha = "0.10.0"
+rayon = "1.12.0"
+zeroize = { version = "1.9.1", features = ["derive"] }
+miniz_oxide = "0.9.1"
+thiserror = "2.0.21"
 
 [dev-dependencies]
-image = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff", "webp", "jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "bmp", "tiff", "webp", "jpeg"] }

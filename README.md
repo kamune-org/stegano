@@ -1,3 +1,5 @@
+<p align="center"><img src="src-tauri/icons/source/icon.svg" width="96" alt="Stegano logo"></p>
+
 # Stegano
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -6,7 +8,7 @@ Stegano hides encrypted text messages and files inside images and audio. The pay
 
 Stegano is a cross-platform app built with [Tauri v2](https://v2.tauri.app/) (Rust) and [Vue 3](https://vuejs.org/). It runs on desktop and Android, and a command-line tool (`stegano`) is included for scripting and headless use.
 
-Current version: **0.2.0**. Format v2 is not compatible with files made by 0.1.x.
+Current version: **0.3.0**. Files made by 0.2.x are fully compatible; format v2 is not compatible with files made by 0.1.x.
 
 ## Features
 
@@ -15,7 +17,10 @@ Current version: **0.2.0**. Format v2 is not compatible with files made by 0.1.x
 - **Same format out:** the output is always the same format as the input file.
 - **Metadata kept:** existing EXIF, ICC, XMP, and other metadata in the carrier is preserved where the format allows.
 - **Capacity shown:** the app reports a maximum capacity and a recommended size for each carrier.
-- **Desktop and Android:** one codebase for macOS, Windows, Linux, and Android, with a Vue UI.
+- **Capture in the app:** take a photo or record audio and use it as the carrier. A fresh capture is the best carrier you can have.
+- **Shrink images:** downscale an image carrier to 80, 50 or 20% before hiding, with the new capacity shown for each size. Resizing re-encodes the image and drops its metadata.
+- **Progress and cancel:** long operations show a progress bar with the current stage, and can be cancelled at any time.
+- **Desktop and Android:** one codebase for macOS, Windows, Linux, and Android, with a Vue UI. On desktop, drop files onto the window.
 
 ## Supported carriers
 

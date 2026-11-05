@@ -1,71 +1,65 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { formatBytes } from "../format";
+import { formatBytes } from "../lib/format";
 
 const props = defineProps<{
-    /** Payload size before compression, or null while unknown. */
     payload: number | null;
     capacity: number;
     recommended: number;
     estimating: boolean;
+    approx: boolean;
+    zone: "safe" | "risky" | "large" | null;
 }>();
 
-type Zone = "good" | "warn" | "bad";
-
-const zone = computed<Zone | null>(() => {
-    if (props.payload === null) return null;
-    if (props.payload <= props.recommended) return "good";
-    if (props.payload <= props.capacity) return "warn";
-    return "bad";
-});
-
-const fillPct = computed(() => {
+const fill = computed(() => {
     if (props.payload === null || props.capacity <= 0) return 0;
     return Math.min(100, (props.payload / props.capacity) * 100);
 });
 
-const markerPct = computed(() =>
+const marker = computed(() =>
     props.capacity > 0 ? Math.min(100, (props.recommended / props.capacity) * 100) : 0,
 );
 
-const message = computed(() => {
-    switch (zone.value) {
-        case "good":
-            return "Low detection risk.";
-        case "warn":
-            return "Fits, but is easier to detect. Smaller payloads are safer.";
-        case "bad":
-            return "Too large for this carrier. Remove content or pick a bigger carrier.";
-        default:
-            return "";
-    }
+const zoneLabel = computed(() => {
+    if (props.zone === "safe") return "Safe";
+    if (props.zone === "risky") return "Risky";
+    if (props.zone === "large") return "Too large";
+    return "";
+});
+
+const payloadLabel = computed(() => {
+    if (props.payload === null) return props.estimating ? "Checking size…" : "0 B";
+    return formatBytes(props.payload);
+});
+
+const live = computed(() => {
+    const cap = `${props.approx ? "about " : ""}${formatBytes(props.capacity)}`;
+    const zone = zoneLabel.value ? ` ${zoneLabel.value}.` : "";
+    return `Payload ${payloadLabel.value}.${zone} Capacity ${cap}. Safe up to ${formatBytes(props.recommended)}.`;
 });
 </script>
 
 <template>
-    <div class="meter" role="group" aria-label="Capacity">
-        <div class="meter-head">
-            <span>
-                Payload:
-                <strong>{{ payload === null ? (estimating ? "calculating…" : "-") : formatBytes(payload) }}</strong>
-            </span>
-            <span class="muted">Capacity {{ formatBytes(capacity) }}</span>
+    <div class="flex flex-col gap-2.5 pt-1" role="group" aria-label="Capacity">
+        <div class="flex items-baseline justify-between gap-3 text-[14px]">
+            <p class="min-w-0 truncate text-muted">
+                <span class="font-semibold text-ink">{{ payloadLabel }}</span>
+                of {{ approx ? "≈ " : "" }}{{ formatBytes(recommended) }} safe
+            </p>
+            <p v-if="zoneLabel" class="shrink-0 font-semibold" :class="`tone-${zone}`">{{ zoneLabel }}</p>
         </div>
         <div
-            class="meter-bar"
+            class="meter"
             role="progressbar"
-            aria-label="Payload size relative to capacity"
+            aria-label="Payload size compared with capacity"
             :aria-valuemin="0"
             :aria-valuemax="capacity"
             :aria-valuenow="payload ?? 0"
         >
-            <div class="meter-fill" :class="zone ?? ''" :style="{ width: fillPct + '%' }"></div>
-            <div class="meter-marker" :style="{ left: markerPct + '%' }" aria-hidden="true"></div>
+            <div class="meter-fill" :class="zone ?? ''" :style="{ width: fill + '%' }"></div>
+            <div class="meter-marker" :style="{ left: marker + '%' }" aria-hidden="true"></div>
         </div>
-        <div class="meter-foot muted">
-            <span>Recommended up to {{ formatBytes(recommended) }}</span>
-        </div>
-        <p v-if="message" class="meter-msg" :class="zone ?? ''" aria-live="polite">{{ message }}</p>
-        <p class="muted small">Compression, if enabled, may shrink the payload below this estimate.</p>
+        <p class="t-caption">Holds up to {{ approx ? "≈ " : "" }}{{ formatBytes(capacity) }} in total.</p>
+        <p class="sr-only" aria-live="polite">{{ live }}</p>
     </div>
 </template>

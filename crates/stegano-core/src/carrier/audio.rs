@@ -11,6 +11,7 @@ use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use rayon::prelude::*;
 
 use super::{Carrier, CarrierFormat, Cover};
+use crate::control::Control;
 use crate::cost;
 use crate::error::{Error, Result};
 
@@ -219,20 +220,22 @@ impl Carrier for Pcm {
         &mut self.cover
     }
 
-    fn costs(&self) -> Vec<f32> {
+    fn costs(&self, ctl: &Control) -> Result<Vec<f32>> {
         let values = &self.cover.values;
         let per_channel: Vec<Vec<f32>> = (0..self.channels)
             .into_par_iter()
             .map(|c| {
-                let signal: Vec<f64> = values
-                    .iter()
-                    .skip(c)
-                    .step_by(self.channels)
-                    .map(|&v| self.sample(v))
-                    .collect();
-                cost::audio(&signal)
+                ctl.check()?;
+                let mut signal = Vec::with_capacity(values.len() / self.channels);
+                for (n, &v) in values.iter().skip(c).step_by(self.channels).enumerate() {
+                    if n.is_multiple_of(4096) {
+                        ctl.check()?;
+                    }
+                    signal.push(self.sample(v));
+                }
+                cost::audio(&signal, ctl)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let mut costs: Vec<f32> = (0..values.len())
             .map(|i| per_channel[i % self.channels][i / self.channels])
             .collect();
@@ -244,7 +247,12 @@ impl Carrier for Pcm {
                 }
             }
         }
-        costs
+        Ok(costs)
+    }
+
+    fn audio_details(&self) -> Option<(u32, u16, u64)> {
+        let frames = (self.cover.values.len() / self.channels.max(1)) as u64;
+        Some((self.sample_rate, self.channels as u16, frames))
     }
 
     fn encode(&mut self) -> Result<Vec<u8>> {

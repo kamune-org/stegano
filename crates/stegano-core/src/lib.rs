@@ -20,18 +20,28 @@
 
 mod carrier;
 mod container;
+mod control;
 mod cost;
 mod crypto;
 mod error;
 mod layout;
+mod pixels;
+mod preview;
+mod resize;
 mod stc;
 
-use rand::{Rng, RngCore};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rand::{Rng, RngExt};
 use rayon::prelude::*;
 
 pub use carrier::{CarrierFormat, CarrierKind};
 pub use container::{Entry, EntryKind};
+pub use control::{Control, Stage};
 pub use error::{Error, Result};
+pub use preview::{thumbnail, waveform};
+pub use resize::resize_image;
 
 use crypto::{Keys, SALT_LEN, TAG_LEN};
 use layout::{HEADER_LEN, HEADER_PLAIN_LEN, Layout, from_bits, to_bits};
@@ -52,6 +62,14 @@ pub struct CarrierInfo {
     pub capacity: usize,
     /// Largest container that keeps detection risk low, in bytes.
     pub recommended: usize,
+    /// Pixel width and height. `None` for audio.
+    pub dimensions: Option<(u32, u32)>,
+    /// Sample rate in hertz. `None` for images.
+    pub sample_rate: Option<u32>,
+    /// Channel count. `None` for images.
+    pub channels: Option<u16>,
+    /// Audio frame count. `None` for images.
+    pub frames: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,12 +120,21 @@ pub fn estimate_payload_size(items: impl IntoIterator<Item = (usize, usize)>) ->
 pub fn inspect(data: &[u8]) -> Result<CarrierInfo> {
     let carrier = carrier::open(data)?;
     let (capacity, recommended) = capacities(carrier.cover());
+    let dimensions = carrier.dimensions();
+    let (sample_rate, channels, frames) = match carrier.audio_details() {
+        Some((rate, channels, frames)) => (Some(rate), Some(channels), Some(frames)),
+        None => (None, None, None),
+    };
     Ok(CarrierInfo {
         format: carrier.format(),
         kind: carrier.format().kind(),
         description: carrier.describe(),
         capacity,
         recommended,
+        dimensions,
+        sample_rate,
+        channels,
+        frames,
     })
 }
 
@@ -122,13 +149,33 @@ fn capacities(cover: &carrier::Cover) -> (usize, usize) {
     (bytes(max_bits), bytes(safe_bits))
 }
 
+/// Hide `entries` in `data`.
+///
+/// Same output as [`embed_with`] with [`Control::none`].
 pub fn embed(
     data: &[u8],
     entries: &[Entry],
     passphrase: &str,
     options: &EmbedOptions,
 ) -> Result<Embedded> {
+    embed_with(data, entries, passphrase, options, &Control::none())
+}
+
+/// Hide `entries` in `data`, reporting each stage and stopping when `ctl` is cancelled.
+///
+/// A cancelled run returns [`Error::Cancelled`] and does not produce a file.
+/// The same inputs and the same RNG draws still produce the same stego bytes:
+/// progress callbacks must not draw from the embed RNG.
+pub fn embed_with(
+    data: &[u8],
+    entries: &[Entry],
+    passphrase: &str,
+    options: &EmbedOptions,
+    ctl: &Control,
+) -> Result<Embedded> {
+    ctl.check()?;
     let mut carrier = carrier::open(data)?;
+    ctl.check()?;
     let format = carrier.format();
     let n = carrier.cover().values.len();
     if n < layout::MIN_ELEMENTS {
@@ -143,13 +190,31 @@ pub fn embed(
             available: capacity,
         });
     }
+    ctl.check()?;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut salt = [0u8; SALT_LEN];
     rng.fill_bytes(&mut salt);
     // Key derivation and cost computation are independent; overlap them.
-    let (keys, costs) = rayon::join(|| Keys::derive(passphrase, &salt), || carrier.costs());
+    // The salt is already drawn, and neither side touches `rng`.
+    ctl.report(Stage::Analyzing, 0.0);
+    let (keys, costs) = rayon::join(
+        || {
+            ctl.check()?;
+            ctl.report(Stage::Keying, 0.0);
+            let keys = Keys::derive(passphrase, &salt);
+            ctl.check()?;
+            if keys.is_ok() {
+                ctl.report(Stage::Keying, 1.0);
+            }
+            keys
+        },
+        || carrier.costs(ctl),
+    );
     let keys = keys?;
+    let costs = costs?;
+    ctl.report(Stage::Analyzing, 1.0);
+    ctl.check()?;
     let body = keys.seal_body(&container)?;
     let mut header = [0u8; HEADER_PLAIN_LEN];
     header[0] = FORMAT_VERSION;
@@ -170,30 +235,41 @@ pub fn embed(
         (layout.salt_end..layout.header_end, &header[..]),
         (layout.header_end..n, &body[..]),
     ];
+    let total_bits = segments.iter().map(|(_, bytes)| bytes.len() * 8).sum();
+    let meter = BlockMeter::new(ctl, Stage::Embedding, 0.0, 1.0, total_bits);
+    let on_blocks = |n| meter.add(n);
+    let opts = stc::StcOpts {
+        cancel: ctl.cancel,
+        on_blocks: ctl
+            .progress
+            .is_some()
+            .then_some(&on_blocks as &(dyn Fn(usize) + Sync)),
+    };
+    ctl.check()?;
+    ctl.report(Stage::Embedding, 0.0);
     let flips = segments
         .into_par_iter()
         .map(|(segment, bytes)| {
-            let changes = stc::embed(segment.len(), &to_bits(bytes), |j| {
-                let p = layout.position(segment.start + j);
-                (parity(values[p]), costs[p])
-            })?;
-            Some(
-                changes
-                    .into_iter()
-                    .map(|j| layout.position(segment.start + j))
-                    .collect::<Vec<_>>(),
+            let changes = stc::embed(
+                segment.len(),
+                &to_bits(bytes),
+                |j| {
+                    let p = layout.position(segment.start + j);
+                    (parity(values[p]), costs[p])
+                },
+                &opts,
             )
+            .map_err(map_embed_stc)?;
+            Ok(changes
+                .into_iter()
+                .map(|j| layout.position(segment.start + j))
+                .collect::<Vec<_>>())
         })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| {
-            Error::UnsuitableCarrier(
-                "not enough noisy or textured area to hide this payload \
-                 (large flat areas, transparency or silence can't be used)"
-                    .into(),
-            )
-        })?
+        .collect::<Result<Vec<_>, Error>>()?
         .concat();
     drop(costs);
+    meter.finish();
+    ctl.check()?;
 
     for &p in &flips {
         let v = &mut cover.values[p];
@@ -201,14 +277,19 @@ pub fn embed(
             *v + 1
         } else if *v >= cover.hi {
             *v - 1
-        } else if rng.r#gen() {
+        } else if rng.random() {
             *v + 1
         } else {
             *v - 1
         };
     }
 
+    ctl.check()?;
+    ctl.report(Stage::Encoding, 0.0);
     let out = carrier.encode()?;
+    ctl.report(Stage::Encoding, 1.0);
+    ctl.check()?;
+    ctl.report(Stage::Verifying, 0.0);
     // Re-read the output to make sure the codec preserved every element.
     let expected = std::mem::take(&mut carrier.cover_mut().values);
     drop(carrier);
@@ -217,6 +298,7 @@ pub fn embed(
             "re-encoded carrier did not preserve the payload".into(),
         ));
     }
+    ctl.report(Stage::Verifying, 1.0);
 
     Ok(Embedded {
         data: out,
@@ -231,28 +313,48 @@ pub fn embed(
     })
 }
 
+/// Read hidden entries from `data`.
+///
+/// Same result as [`extract_with`] with [`Control::none`].
 pub fn extract(data: &[u8], passphrase: &str) -> Result<Vec<Entry>> {
+    extract_with(data, passphrase, &Control::none())
+}
+
+/// Read hidden entries from `data`, reporting each stage and stopping when `ctl` is cancelled.
+pub fn extract_with(data: &[u8], passphrase: &str, ctl: &Control) -> Result<Vec<Entry>> {
+    ctl.check()?;
     let carrier = carrier::open(data)?;
+    ctl.check()?;
     let values = &carrier.cover().values;
     let n = values.len();
     if n < layout::MIN_ELEMENTS {
         return Err(Error::NotFound);
     }
     let mut layout = Layout::new(n, carrier.format().tag());
-    let read = |layout: &Layout, segment: std::ops::Range<usize>, bytes: usize| {
-        from_bits(&stc::extract(segment.len(), bytes * 8, |j| {
-            parity(values[layout.position(segment.start + j)])
-        }))
-    };
+    ctl.report(Stage::Extracting, 0.0);
 
-    let salt: [u8; SALT_LEN] = read(&layout, 0..layout.salt_end, SALT_LEN)
-        .try_into()
-        .unwrap();
+    let salt = read_bits(
+        ctl,
+        values,
+        &layout,
+        0..layout.salt_end,
+        SALT_LEN,
+        0.0,
+        0.05,
+    )?;
+    let salt: [u8; SALT_LEN] = salt.try_into().unwrap();
+    ctl.check()?;
+    ctl.report(Stage::Keying, 0.0);
     let keys = Keys::derive(passphrase, &salt)?;
+    ctl.check()?;
+    ctl.report(Stage::Keying, 1.0);
     layout.set_key(&keys.permutation);
 
     let header_at = layout.salt_end..layout.header_end;
-    let header = keys.open_header(&read(&layout, header_at, HEADER_LEN))?;
+    let header = read_bits(ctl, values, &layout, header_at, HEADER_LEN, 0.05, 0.07)?;
+    ctl.check()?;
+    ctl.report(Stage::Decrypting, 0.0);
+    let header = keys.open_header(&header)?;
     if header[0] != FORMAT_VERSION {
         return Err(Error::Corrupt(format!(
             "unsupported format version {}",
@@ -265,11 +367,132 @@ pub fn extract(data: &[u8], passphrase: &str) -> Result<Vec<Entry>> {
             "declared payload is larger than the carrier".into(),
         ));
     }
-    let body = read(&layout, layout.header_end..n, body_len);
+    ctl.check()?;
+    let body = read_bits(
+        ctl,
+        values,
+        &layout,
+        layout.header_end..n,
+        body_len,
+        0.12,
+        0.88,
+    )?;
     let container = keys
         .open_body(&body)
         .map_err(|_| Error::Corrupt("the carrier was modified after the data was hidden".into()))?;
-    container::decode(&container)
+    let entries = container::decode(&container)?;
+    ctl.report(Stage::Decrypting, 1.0);
+    Ok(entries)
+}
+
+/// Counts finished STC message bits and reports a monotonic stage fraction.
+///
+/// Idle when the caller passed no progress callback: no atomics and no lock.
+/// Otherwise one `fetch_add` per batch, and the lock is taken only to publish
+/// a fraction strictly ahead of the last one this meter emitted.
+struct BlockMeter<'a> {
+    ctl: &'a Control<'a>,
+    stage: Stage,
+    start: f32,
+    span: f32,
+    total: usize,
+    active: bool,
+    done: AtomicUsize,
+    reported: AtomicUsize,
+    lock: Mutex<()>,
+}
+
+impl<'a> BlockMeter<'a> {
+    fn new(ctl: &'a Control<'a>, stage: Stage, start: f32, span: f32, total: usize) -> Self {
+        Self {
+            ctl,
+            stage,
+            start,
+            span,
+            total,
+            active: ctl.progress.is_some(),
+            done: AtomicUsize::new(0),
+            reported: AtomicUsize::new(0),
+            lock: Mutex::new(()),
+        }
+    }
+
+    fn add(&self, n: usize) {
+        if !self.active || n == 0 {
+            return;
+        }
+        let done = self.done.fetch_add(n, Ordering::Relaxed) + n;
+        if done <= self.reported.load(Ordering::Relaxed) {
+            return;
+        }
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if done <= self.reported.load(Ordering::Relaxed) {
+            return;
+        }
+        self.reported.store(done, Ordering::Relaxed);
+        let frac = if self.total == 0 {
+            self.start + self.span
+        } else {
+            self.start + self.span * (done as f32 / self.total as f32)
+        };
+        self.ctl.report(self.stage, frac);
+    }
+
+    fn finish(&self) {
+        if self.active {
+            self.ctl.report(self.stage, self.start + self.span);
+        }
+    }
+}
+
+fn read_bits(
+    ctl: &Control,
+    values: &[i32],
+    layout: &Layout,
+    segment: std::ops::Range<usize>,
+    bytes: usize,
+    start: f32,
+    span: f32,
+) -> Result<Vec<u8>> {
+    let bits = bytes.saturating_mul(8);
+    let meter = BlockMeter::new(ctl, Stage::Extracting, start, span, bits);
+    let on_blocks = |n| meter.add(n);
+    let msg = stc::extract(
+        segment.len(),
+        bits,
+        |j| parity(values[layout.position(segment.start + j)]),
+        &stc::StcOpts {
+            cancel: ctl.cancel,
+            on_blocks: ctl
+                .progress
+                .is_some()
+                .then_some(&on_blocks as &(dyn Fn(usize) + Sync)),
+        },
+    )
+    .map_err(map_extract_stc)?;
+    meter.finish();
+    Ok(from_bits(&msg))
+}
+
+fn map_embed_stc(err: stc::StcError) -> Error {
+    match err {
+        stc::StcError::Cancelled => Error::Cancelled,
+        stc::StcError::Wet => Error::UnsuitableCarrier(
+            "not enough noisy or textured area to hide this payload \
+             (large flat areas, transparency or silence can't be used)"
+                .into(),
+        ),
+    }
+}
+
+fn map_extract_stc(err: stc::StcError) -> Error {
+    match err {
+        stc::StcError::Cancelled => Error::Cancelled,
+        stc::StcError::Wet => Error::Internal("extract hit a wet element".into()),
+    }
 }
 
 fn parity(v: i32) -> u8 {

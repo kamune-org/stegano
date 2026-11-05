@@ -11,6 +11,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat};
 use rayon::prelude::*;
 
 use super::{Carrier, CarrierFormat, Cover};
+use crate::control::Control;
 use crate::cost;
 use crate::error::{Error, Result};
 
@@ -288,28 +289,40 @@ impl Carrier for Raster {
         &mut self.cover
     }
 
-    fn costs(&self) -> Vec<f32> {
+    fn costs(&self, ctl: &Control) -> Result<Vec<f32>> {
         // One plane at a time (each parallelized internally) to bound memory.
-        let colour = self.colour_channels();
+        let colour = self.colour_channels().max(1);
         let mut costs = vec![0f32; self.cover.values.len()];
-        for c in 0..colour {
-            let plane: Vec<f32> = self
-                .samples
-                .par_iter()
-                .skip(c)
-                .step_by(self.channels)
-                .map(|&s| s as f32)
-                .collect();
-            let plane = cost::hill(&plane, self.width, self.height);
+        for c in 0..self.colour_channels() {
+            ctl.check()?;
+            let mut plane = vec![0f32; self.width * self.height];
+            let channels = self.channels;
+            let samples = &self.samples;
+            plane.par_chunks_mut(self.width).enumerate().try_for_each(
+                |(y, row)| -> Result<()> {
+                    ctl.check()?;
+                    for (x, out) in row.iter_mut().enumerate() {
+                        *out = samples[(y * self.width + x) * channels + c] as f32;
+                    }
+                    Ok(())
+                },
+            )?;
+            let plane = cost::hill(&plane, self.width, self.height, ctl)?;
             match &self.positions {
-                None => costs
-                    .par_iter_mut()
-                    .skip(c)
-                    .step_by(colour)
-                    .zip(plane.par_iter())
-                    .for_each(|(dst, &src)| *dst = src),
+                None => {
+                    ctl.check()?;
+                    costs
+                        .par_iter_mut()
+                        .skip(c)
+                        .step_by(colour)
+                        .zip(plane.par_iter())
+                        .for_each(|(dst, &src)| *dst = src);
+                }
                 Some(positions) => {
-                    for (dst, &i) in costs.iter_mut().zip(positions) {
+                    for (n, (dst, &i)) in costs.iter_mut().zip(positions).enumerate() {
+                        if n.is_multiple_of(4096) {
+                            ctl.check()?;
+                        }
                         let i = i as usize;
                         if i % self.channels == c {
                             *dst = plane[i / self.channels];
@@ -317,8 +330,13 @@ impl Carrier for Raster {
                     }
                 }
             }
+            ctl.report(crate::Stage::Analyzing, (c + 1) as f32 / colour as f32);
         }
-        costs
+        Ok(costs)
+    }
+
+    fn dimensions(&self) -> Option<(u32, u32)> {
+        Some((self.width as u32, self.height as u32))
     }
 
     fn encode(&mut self) -> Result<Vec<u8>> {

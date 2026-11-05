@@ -4,8 +4,10 @@
 
 mod audio;
 mod jpeg;
+pub(crate) mod jpeg_pixels;
 mod raster;
 
+use crate::control::Control;
 use crate::error::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +132,15 @@ pub(crate) trait Carrier: Send + Sync {
     fn cover(&self) -> &Cover;
     fn cover_mut(&mut self) -> &mut Cover;
     /// Cost of a ±1 change per element; `INFINITY` means never change.
-    fn costs(&self) -> Vec<f32>;
+    fn costs(&self, ctl: &Control) -> Result<Vec<f32>>;
+    /// Pixel width and height. Images only.
+    fn dimensions(&self) -> Option<(u32, u32)> {
+        None
+    }
+    /// Sample rate, channel count, and frame count. Audio only.
+    fn audio_details(&self) -> Option<(u32, u16, u64)> {
+        None
+    }
     /// Re-encode the carrier with the current values in its cover.
     fn encode(&mut self) -> Result<Vec<u8>>;
 }

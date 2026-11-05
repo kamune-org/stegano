@@ -14,6 +14,7 @@ use std::ptr;
 use mozjpeg_sys::*;
 
 use super::{Carrier, CarrierFormat, Cover};
+use crate::control::Control;
 use crate::cost;
 use crate::error::{Error, Result};
 
@@ -114,11 +115,25 @@ impl Carrier for Jpeg {
         &mut self.cover
     }
 
-    fn costs(&self) -> Vec<f32> {
-        self.components
-            .iter()
-            .flat_map(|c| cost::uerd(&c.blocks, c.width_in_blocks, c.height_in_blocks, &c.quant))
-            .collect()
+    fn costs(&self, ctl: &Control) -> Result<Vec<f32>> {
+        let n = self.components.len().max(1);
+        let mut costs = Vec::new();
+        for (i, c) in self.components.iter().enumerate() {
+            ctl.check()?;
+            costs.extend(cost::uerd(
+                &c.blocks,
+                c.width_in_blocks,
+                c.height_in_blocks,
+                &c.quant,
+                ctl,
+            )?);
+            ctl.report(crate::Stage::Analyzing, (i + 1) as f32 / n as f32);
+        }
+        Ok(costs)
+    }
+
+    fn dimensions(&self) -> Option<(u32, u32)> {
+        Some((self.width, self.height))
     }
 
     fn encode(&mut self) -> Result<Vec<u8>> {
@@ -175,7 +190,7 @@ unsafe extern "C-unwind" fn error_exit(cinfo: &mut jpeg_common_struct) {
 
 unsafe extern "C-unwind" fn silence(_: &mut jpeg_common_struct, _: c_int) {}
 
-fn new_error_mgr() -> Box<jpeg_error_mgr> {
+pub(crate) fn new_error_mgr() -> Box<jpeg_error_mgr> {
     unsafe {
         let mut err: Box<jpeg_error_mgr> = Box::new(mem::zeroed());
         jpeg_std_error(&mut err);
@@ -291,7 +306,7 @@ unsafe fn write(
     Ok(out)
 }
 
-fn panic_message(e: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_message(e: Box<dyn std::any::Any + Send>) -> String {
     e.downcast_ref::<String>()
         .cloned()
         .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
