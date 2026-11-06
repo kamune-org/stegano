@@ -89,6 +89,13 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    // AGP 9's lint crashes on the Kotlin build scripts during the release
+    // "lint vital" check ("findFirCompiledSymbol only works on compiled
+    // declarations", a lint bug). Lint does not affect the APK; run
+    // `./gradlew lint` separately when needed.
+    lint {
+        checkReleaseBuilds = false
+    }
 }
 
 kotlin {
