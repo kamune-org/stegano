@@ -257,7 +257,7 @@ jobs:
           fi
 
       - name: Build APK and AAB
-        run: npm run tauri -- android build --apk true --aab true
+        run: npm run tauri -- android build --apk --aab
 
       - name: Collect artifacts
         run: |
