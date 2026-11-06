@@ -32,15 +32,28 @@ No other runtime dependencies without a reason.
 
 Two modes, **Hide** and **Reveal**.
 
-- **Phone (< 768 px):** top app bar (app name, mode title), scrolling content,
-  a sticky **action bar** (capacity summary + primary button), and a **bottom
-  navigation bar** with Hide / Reveal. While a text field is focused on a touch
-  device, the bottom nav and action bar are hidden (they come back on blur), so
-  the keyboard area is all content.
-- **Desktop (≥ 768 px):** header with the app name and a segmented control for
-  Hide / Reveal, content centred (max width ~1040 px). Hide uses two columns:
-  carrier on the left, secret + passphrase on the right; the action bar is
-  sticky at the bottom of the window.
+The layout follows the input device, not only the width (`src/lib/layout.ts`
+sets `data-ui="phone|desktop"` and `data-split` on `<html>`):
+
+- **Phone (coarse pointer, and always on Android):** top app bar with the
+  mode title, a "Cover · Secret · Passphrase" step header, a scrolling
+  column of cards, a sticky **action bar** (capacity summary + primary
+  button), and a **bottom navigation bar** with Hide / Reveal. While a text
+  field is focused, the bottom nav and action bar are hidden (they come back
+  on blur), so the keyboard area is all content.
+- **Desktop (fine pointer):** native density at every width: the system UI
+  font at 13 px, 28 px controls, arrow cursor, focus rings only for keyboard
+  focus, non-selectable chrome. A unified 52 px toolbar is the window's
+  title bar on macOS (overlay title bar, traffic lights on the left): Hide /
+  Reveal segmented control in the centre, the primary action on the right
+  with the "why disabled" hint beside it. At 860 px and wider the window is a
+  **split view**: the cover file on the left like Preview (large preview,
+  info bar, a Size drop-down), and an inspector-style form on the right that
+  scrolls on its own. Narrower windows stack the two in one column. Keyboard
+  shortcuts: ⌘O choose cover, ⇧⌘O add files, ⌘↩ Hide / Reveal, ⌘S save,
+  ⌘1 / ⌘2 switch mode, Esc closes dialogs (Ctrl on Windows and Linux).
+- No app logo inside the window: the Dock, taskbar and title bar already
+  identify the app.
 - Both views stay mounted (`v-show`), so switching tabs keeps the Hide form.
   Revealed content is wiped when the user leaves Reveal (as in 0.2), with a
   small note saying so.
@@ -148,9 +161,11 @@ file behind.
 - Tokens as CSS variables on `:root` (light) and `.dark` / `prefers-color-scheme`
   (dark): background, surface, surface-raised, border, text, text-muted,
   primary (indigo, around #5B5BD6), success, warning, danger, focus ring.
-- Type: system UI font stack, 16 px base (no zoom on focus on mobile), 600
-  weight titles.
-- Radius 12 px on cards, 10 px on controls; touch targets at least 44 px.
+- Type: Inter on phones (16 px base, no zoom on focus), the system UI font on
+  desktop (13 px); JetBrains Mono for passphrases and revealed text. Both
+  bundled, so they work offline.
+- Phones: radius 16 px on cards, 12 px on controls, touch targets at least
+  44 px. Desktop: no cards, 28 px controls with 6 px radius.
 - Motion: 150–200 ms ease-out for sheets and toasts; respect
   `prefers-reduced-motion`.
 - Safe areas: `env(safe-area-inset-*)` padding on app bar, bottom nav and
