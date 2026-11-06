@@ -3,6 +3,9 @@ import { carrierPreview, inspectCarrier, normalizeError, statFiles, type Carrier
 import { isAndroid, isTauri } from "../api/pickers";
 import { blobBytes, decodePeaks, sniffImageMime } from "./preview";
 
+/** Longest side of image previews, in pixels: sharp in the desktop preview pane on retina screens and on high-density phones. */
+const PREVIEW_SIZE = 1280;
+
 export type CarrierStatus = "empty" | "loading" | "ready" | "error";
 
 export function useCarrierLoader() {
@@ -53,7 +56,7 @@ export function useCarrierLoader() {
         const [statResult, infoResult, previewResult] = await Promise.allSettled([
             wantStat ? statFiles([file.path]) : Promise.resolve(null),
             inspectCarrier(file.path),
-            carrierPreview(file.path, 640),
+            carrierPreview(file.path, PREVIEW_SIZE),
         ]);
         if (mine !== token) return;
 
