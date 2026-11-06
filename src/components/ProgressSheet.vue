@@ -2,6 +2,7 @@
 import { onBeforeUnmount, ref, watch } from "vue";
 import { ProgressIndicator, ProgressRoot } from "reka-ui";
 import { formatDuration, percentOf } from "../lib/format";
+import { useLayout } from "../lib/layout";
 import ResponsiveSheet from "./ResponsiveSheet.vue";
 
 const props = defineProps<{
@@ -14,6 +15,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ cancel: [] }>();
 
+const { desktop } = useLayout();
 const elapsed = ref("0:00");
 let timer = 0;
 
@@ -41,10 +43,30 @@ onBeforeUnmount(() => window.clearInterval(timer));
 
 <template>
     <ResponsiveSheet :open="open" :title="title" description="Large files can take a minute." :dismissable="false" @blocked="emit('cancel')">
-        <div class="flex flex-col gap-5 pb-1">
+        <div v-if="desktop" class="dlg-progress">
+            <div class="dlg-progress-head">
+                <p class="t-body" aria-live="polite">{{ label }}</p>
+                <p class="t-body dlg-pct" aria-hidden="true">{{ percentOf(fraction) }}%</p>
+            </div>
+            <ProgressRoot
+                class="bar-thick"
+                :model-value="percentOf(fraction)"
+                :max="100"
+                :get-value-text="() => `${label}, ${percentOf(fraction)} percent`"
+            >
+                <ProgressIndicator :style="{ transform: `translateX(-${100 - percentOf(fraction)}%)` }" class="block" />
+            </ProgressRoot>
+            <div class="dlg-actions">
+                <p class="t-caption dlg-elapsed">{{ elapsed }} elapsed</p>
+                <button type="button" class="btn btn-tonal" :disabled="cancelling" @click="emit('cancel')">
+                    {{ cancelling ? "Cancelling…" : "Cancel" }}
+                </button>
+            </div>
+        </div>
+        <div v-else class="flex flex-col gap-5 pb-1">
             <div>
                 <p class="big-pct" aria-hidden="true">{{ percentOf(fraction) }}%</p>
-                <p class="mt-2 text-[15px] text-muted" aria-live="polite">{{ label }}</p>
+                <p class="mt-2 t-body text-muted" aria-live="polite">{{ label }}</p>
             </div>
             <ProgressRoot
                 class="bar-thick"

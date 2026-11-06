@@ -22,9 +22,9 @@ function iconFor(name: string): Component {
             <span class="row-icon">
                 <component :is="iconFor(file.name)" :size="18" aria-hidden="true" />
             </span>
-            <div class="min-w-0 flex-1">
-                <p class="truncate text-[15px] font-medium">{{ file.name }}</p>
-                <p class="t-caption">{{ formatBytes(file.size) }}</p>
+            <div class="row-main min-w-0 flex-1">
+                <p class="row-name truncate t-body font-medium">{{ file.name }}</p>
+                <p class="t-caption row-size">{{ formatBytes(file.size) }}</p>
             </div>
             <button
                 type="button"

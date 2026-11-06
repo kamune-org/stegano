@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { toast, Toaster } from "vue-sonner";
-import logoUrl from "./assets/logo.svg";
 import { useDesktopDragDrop } from "./lib/dragdrop";
 import { useTextFieldFocus } from "./lib/keyboard";
+import { useLayout } from "./lib/layout";
+import { useShortcuts } from "./lib/shortcuts";
 import { useHideStore } from "./stores/hide";
 import { useRevealStore } from "./stores/reveal";
 import ActionBar from "./components/ActionBar.vue";
 import AppBar from "./components/AppBar.vue";
 import BottomNav from "./components/BottomNav.vue";
-import ModeSwitch from "./components/ModeSwitch.vue";
+import DesktopToolbar from "./components/DesktopToolbar.vue";
 import HideView from "./views/HideView.vue";
 import RevealView from "./views/RevealView.vue";
 
@@ -19,6 +20,7 @@ const mode = ref<Mode>("hide");
 const hide = useHideStore();
 const reveal = useRevealStore();
 const keyboard = useTextFieldFocus();
+const { desktop } = useLayout();
 const locked = computed(() => hide.busy || reveal.busy);
 const scrolled = ref(false);
 const scroller = ref<HTMLElement | null>(null);
@@ -41,6 +43,29 @@ const { over } = useDesktopDragDrop({
     onReject: (message) => toast.error(message),
 });
 
+useShortcuts({
+    choose: () => {
+        if (mode.value === "hide") void hide.chooseCarrier();
+        else void reveal.chooseCarrier();
+    },
+    addFiles: () => {
+        if (mode.value === "hide") void hide.addFiles();
+    },
+    run: () => {
+        if (mode.value === "hide") void hide.run();
+        else void reveal.run();
+    },
+    save: () => {
+        if (hide.phase !== "result" || hide.savedPath || hide.saving) return false;
+        void hide.saveResult();
+        return true;
+    },
+    mode: (next) => {
+        if (!locked.value) mode.value = next;
+    },
+    blocked: () => locked.value || hide.phase !== "idle" || reveal.progressOpen,
+});
+
 function onScroll(event: Event): void {
     const target = event.target;
     if (target instanceof HTMLElement) scrolled.value = target.scrollTop > 2;
@@ -59,18 +84,9 @@ watch(mode, (next, prev) => {
 
 <template>
     <div class="app-shell">
-        <AppBar :title="mode === 'hide' ? 'Hide' : 'Reveal'" :scrolled="scrolled" />
-        <header class="topbar" :data-scrolled="scrolled ? 'true' : 'false'">
-            <div class="topbar-inner mx-auto max-w-[960px]">
-                <div class="flex items-center gap-2.5">
-                    <img :src="logoUrl" alt="" aria-hidden="true" class="size-7 shrink-0 rounded-[8px]" />
-                    <p class="text-[15px] font-semibold tracking-[-0.01em]">Stegano</p>
-                </div>
-                <ModeSwitch v-model="mode" :disabled="locked" />
-                <div></div>
-            </div>
-        </header>
-        <main ref="scroller" class="min-h-0 flex-1 overflow-y-auto" @scroll.passive="onScroll">
+        <DesktopToolbar v-if="desktop" v-model="mode" :disabled="locked" />
+        <AppBar v-else :title="mode === 'hide' ? 'Hide' : 'Reveal'" :scrolled="scrolled" />
+        <main ref="scroller" class="app-main min-h-0 flex-1 overflow-y-auto" @scroll.passive="onScroll">
             <div class="page">
                 <HideView
                     v-show="mode === 'hide'"
@@ -85,7 +101,7 @@ watch(mode, (next, prev) => {
                 />
             </div>
         </main>
-        <div v-show="!keyboard" class="bars">
+        <div v-if="!desktop" v-show="!keyboard" class="bars">
             <ActionBar :mode="mode" />
             <BottomNav v-model="mode" :disabled="locked" />
         </div>

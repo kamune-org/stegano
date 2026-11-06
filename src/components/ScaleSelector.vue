@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { ChevronsUpDown } from "@lucide/vue";
 import { SCALES, type CarrierInfo, type Scale } from "../api";
 import { formatBytes, percentOf, stageLabel } from "../lib/format";
+import { useLayout } from "../lib/layout";
 
 const scale = defineModel<Scale>({ required: true });
 const props = defineProps<{
@@ -15,6 +17,7 @@ const props = defineProps<{
     disabled?: boolean;
 }>();
 const emit = defineEmits<{ cancel: [] }>();
+const { desktop } = useLayout();
 
 const options = computed(() =>
     SCALES.map((value) => {
@@ -47,10 +50,38 @@ function choose(value: Scale): void {
     if (props.disabled) return;
     scale.value = value;
 }
+
+type Option = (typeof options.value)[number];
+
+function optionLabel(option: Option): string {
+    const dims = option.width && option.height ? `${option.width}×${option.height}` : "";
+    if (option.value === 1) return dims ? `Original (${dims})` : "Original";
+    const capacity = `${option.approx ? "≈ " : ""}${formatBytes(option.capacity)}`;
+    return `${Math.round(option.value * 100)}%${dims ? ` (${dims})` : ""} ${capacity}`;
+}
+
+function onPick(event: Event): void {
+    const value = Number((event.target as HTMLSelectElement).value);
+    const next = SCALES.find((item) => item === value);
+    if (next !== undefined) choose(next);
+}
 </script>
 
 <template>
     <div>
+        <div v-if="desktop" class="scale-row">
+            <label for="scale-select" class="t-label">Size</label>
+            <div class="select-wrap">
+                <select id="scale-select" class="select" :value="scale" :disabled="disabled" @change="onPick">
+                    <option v-for="option in options" :key="option.value" :value="option.value">
+                        {{ optionLabel(option) }}
+                    </option>
+                </select>
+                <ChevronsUpDown :size="12" class="select-icon" aria-hidden="true" />
+            </div>
+            <p v-if="scale !== 1" class="t-caption scale-note">Re-encodes the image and removes metadata.</p>
+        </div>
+        <template v-else>
         <p id="scale-label" class="t-label mb-2">Size</p>
         <div
             class="seg"
@@ -78,8 +109,9 @@ function choose(value: Scale): void {
             </template>
         </p>
         <p v-if="scale !== 1" class="t-caption mt-1">Resizing re-encodes the image and removes metadata.</p>
-        <div v-if="preparing" class="mt-3" aria-live="polite">
-            <div class="mb-1.5 flex items-center justify-between text-[13px]">
+        </template>
+        <div v-if="preparing" class="prepare mt-3" aria-live="polite">
+            <div class="prepare-head mb-1.5 flex items-center justify-between text-[13px]">
                 <span class="text-muted">{{ stageLabel(stage) }}</span>
                 <span class="font-medium">{{ percentOf(fraction) }}%</span>
             </div>
@@ -93,10 +125,10 @@ function choose(value: Scale): void {
             >
                 <div class="meter-fill" style="background: var(--primary)" :style="{ width: percentOf(fraction) + '%' }"></div>
             </div>
-            <button type="button" class="btn btn-ghost -ml-3 mt-1" :disabled="cancelling" @click="emit('cancel')">
+            <button type="button" class="btn btn-ghost prepare-cancel -ml-3 mt-1" :disabled="cancelling" @click="emit('cancel')">
                 {{ cancelling ? "Cancelling…" : "Cancel" }}
             </button>
         </div>
-        <p v-if="error" class="mt-2 text-sm text-danger" role="alert">{{ error }}</p>
+        <p v-if="error" class="prepare-error mt-2 text-sm text-danger" role="alert">{{ error }}</p>
     </div>
 </template>

@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { Check, Copy, FileText } from "@lucide/vue";
 import type { RevealedEntry } from "../api";
 import { formatBytes, formatDate, safeFileName } from "../lib/format";
+import { useLayout } from "../lib/layout";
 
 defineProps<{
     entries: RevealedEntry[];
@@ -12,6 +13,7 @@ defineProps<{
 }>();
 const emit = defineEmits<{ copy: [entry: RevealedEntry, area: HTMLTextAreaElement | null]; save: [entry: RevealedEntry]; clear: [] }>();
 
+const { desktop } = useLayout();
 const areas = ref<Record<number, HTMLTextAreaElement | null>>({});
 
 function bindArea(index: number) {
@@ -33,9 +35,16 @@ function bindArea(index: number) {
             </div>
             <button type="button" class="btn btn-ghost -mr-3 shrink-0" :disabled="disabled" @click="emit('clear')">Clear</button>
         </div>
-        <p v-if="entries.length === 0" class="text-[15px] text-muted">The hidden payload is empty.</p>
+        <p v-if="entries.length === 0" class="t-body text-muted">The hidden payload is empty.</p>
         <article v-for="entry in entries.filter((item) => item.kind === 'text')" :key="entry.index" class="flex flex-col gap-2">
-            <label :for="`entry-${entry.index}`" class="t-label">Message</label>
+            <div class="flex items-center justify-between gap-3">
+                <label :for="`entry-${entry.index}`" class="t-label msg-label">Message</label>
+                <button v-if="desktop" type="button" class="btn btn-tonal btn-sm" @click="emit('copy', entry, areas[entry.index] ?? null)">
+                    <Check v-if="copied === entry.index" :size="13" aria-hidden="true" />
+                    <Copy v-else :size="13" aria-hidden="true" />
+                    {{ copied === entry.index ? "Copied" : "Copy" }}
+                </button>
+            </div>
             <textarea
                 :id="`entry-${entry.index}`"
                 :ref="bindArea(entry.index)"
@@ -45,7 +54,7 @@ function bindArea(index: number) {
                 :value="entry.text ?? ''"
                 autocomplete="off"
             ></textarea>
-            <button type="button" class="btn btn-tonal self-start" @click="emit('copy', entry, areas[entry.index] ?? null)">
+            <button v-if="!desktop" type="button" class="btn btn-tonal self-start" @click="emit('copy', entry, areas[entry.index] ?? null)">
                 <Check v-if="copied === entry.index" :size="18" aria-hidden="true" />
                 <Copy v-else :size="18" aria-hidden="true" />
                 {{ copied === entry.index ? "Copied" : "Copy" }}
@@ -56,9 +65,9 @@ function bindArea(index: number) {
                 <span class="row-icon">
                     <FileText :size="18" aria-hidden="true" />
                 </span>
-                <div class="min-w-0 flex-1">
-                    <p class="truncate text-[15px] font-medium">{{ safeFileName(entry.name) }}</p>
-                    <p class="t-caption">
+                <div class="row-main min-w-0 flex-1">
+                    <p class="row-name truncate t-body font-medium">{{ safeFileName(entry.name) }}</p>
+                    <p class="t-caption row-size">
                         {{ formatBytes(entry.size) }}
                         <template v-if="entry.modified !== null"> · modified {{ formatDate(entry.modified) }}</template>
                     </p>

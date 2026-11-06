@@ -3,6 +3,7 @@ import { nextTick, ref, watch } from "vue";
 import { Plus } from "@lucide/vue";
 import type { PickedFile } from "../api";
 import { formatBytes } from "../lib/format";
+import { useLayout, withShortcut } from "../lib/layout";
 import FileList from "./FileList.vue";
 
 const text = defineModel<string>({ required: true });
@@ -15,6 +16,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ add: []; remove: [index: number]; files: [files: File[]] }>();
 
+const { desktop } = useLayout();
 const root = ref<HTMLElement | null>(null);
 const area = ref<HTMLTextAreaElement | null>(null);
 defineExpose({ el: root });
@@ -53,10 +55,10 @@ function onDrop(event: DragEvent): void {
         @dragover="onDragOver"
         @drop="onDrop"
     >
-        <h2 id="secret-heading" class="t-section">Secret</h2>
+        <h2 id="secret-heading" :class="desktop ? 'sr-only' : 't-section'">Secret</h2>
         <div>
             <div class="mb-2 flex items-baseline justify-between gap-3">
-                <label for="hide-message" class="t-label">Message</label>
+                <label for="hide-message" class="t-label msg-label">Message</label>
                 <p class="t-caption" aria-hidden="true">{{ formatBytes(bytes) }}</p>
             </div>
             <textarea
@@ -71,13 +73,26 @@ function onDrop(event: DragEvent): void {
                 @input="grow"
             ></textarea>
         </div>
-        <div v-if="files.length" class="-my-1">
-            <FileList :files="files" :disabled="disabled" @remove="emit('remove', $event)" />
+        <div v-if="desktop" class="sect-files">
+            <div class="sect-head">
+                <h3 class="t-section">Files</h3>
+                <button type="button" class="btn btn-tonal btn-sm" :disabled="disabled" :title="withShortcut('Add files', 'O', true)" @click="emit('add')">
+                    <Plus :size="13" aria-hidden="true" />
+                    Add Files…
+                </button>
+            </div>
+            <FileList v-if="files.length" :files="files" :disabled="disabled" @remove="emit('remove', $event)" />
+            <p v-else class="t-caption">Drop files here or use Add Files…</p>
         </div>
-        <button type="button" class="btn btn-tonal self-start" :disabled="disabled" @click="emit('add')">
-            <Plus :size="18" aria-hidden="true" />
-            Add files
-        </button>
+        <template v-else>
+            <div v-if="files.length" class="-my-1">
+                <FileList :files="files" :disabled="disabled" @remove="emit('remove', $event)" />
+            </div>
+            <button type="button" class="btn btn-tonal self-start" :disabled="disabled" @click="emit('add')">
+                <Plus :size="18" aria-hidden="true" />
+                Add files
+            </button>
+        </template>
         <slot />
     </section>
 </template>

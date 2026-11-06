@@ -61,7 +61,7 @@ function onDismiss(event: Event): void {
                     <DialogDescription v-if="description" class="sheet-desc">{{ description }}</DialogDescription>
                     <DialogDescription v-else class="sr-only">{{ title }}</DialogDescription>
                 </template>
-                <div :class="bare ? '' : 'mt-4'">
+                <div :class="bare ? 'sheet-body' : 'sheet-body mt-4'">
                     <slot />
                 </div>
             </DialogContent>

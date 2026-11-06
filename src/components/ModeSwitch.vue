@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Eye, EyeOff } from "@lucide/vue";
+import { withShortcut } from "../lib/layout";
 
 const mode = defineModel<"hide" | "reveal">({ required: true });
 defineProps<{ disabled?: boolean }>();
@@ -21,6 +22,7 @@ function choose(next: "hide" | "reveal"): void {
             :aria-selected="mode === 'hide'"
             aria-controls="panel-hide"
             :disabled="disabled && mode !== 'hide'"
+            :title="withShortcut('Hide', '1')"
             @click="choose('hide')"
         >
             <EyeOff :size="15" aria-hidden="true" />
@@ -33,6 +35,7 @@ function choose(next: "hide" | "reveal"): void {
             :aria-selected="mode === 'reveal'"
             aria-controls="panel-reveal"
             :disabled="disabled && mode !== 'reveal'"
+            :title="withShortcut('Reveal', '2')"
             @click="choose('reveal')"
         >
             <Eye :size="15" aria-hidden="true" />

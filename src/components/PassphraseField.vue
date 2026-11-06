@@ -56,15 +56,15 @@ const hintId = computed(() => `${props.id}-hint`);
                 <Eye v-else :size="18" aria-hidden="true" />
             </button>
         </div>
-        <div v-if="showStrength" class="mt-3 flex items-center gap-3" aria-live="polite">
+        <div v-if="showStrength" class="strength-row mt-3 flex items-center gap-3" aria-live="polite">
             <div class="strength-bars" :data-tone="strength.tone" aria-hidden="true">
                 <span v-for="n in 4" :key="n" :class="{ on: n <= segments }"></span>
             </div>
-            <span class="w-14 text-right text-[13px] font-medium" :class="strength.tone === 'none' ? '' : `tone-${strength.tone}`">
+            <span class="strength-label w-14 text-right text-[13px] font-medium" :class="strength.tone === 'none' ? '' : `tone-${strength.tone}`">
                 {{ strength.label }}
             </span>
         </div>
-        <p :id="hintId" class="text-[13px] text-danger" :class="error ? 'mt-2' : ''" role="alert" aria-live="polite">
+        <p :id="hintId" class="pass-hint text-[13px] text-danger" :class="error ? 'mt-2' : ''" role="alert" aria-live="polite">
             {{ error }}
         </p>
     </div>

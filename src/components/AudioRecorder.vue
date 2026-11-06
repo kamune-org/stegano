@@ -181,14 +181,14 @@ onBeforeUnmount(closeAll);
         @close="open = false"
     >
         <div class="flex flex-col items-center gap-4 py-2">
-            <p class="text-4xl font-semibold tabular-nums" aria-live="off">{{ formatDuration(elapsedMs) }}</p>
+            <p class="rec-time text-4xl font-semibold tabular-nums" aria-live="off">{{ formatDuration(elapsedMs) }}</p>
             <p class="text-xs text-muted">10:00 maximum</p>
             <div class="level w-full" aria-hidden="true">
                 <span :style="{ width: `${Math.round(level * 100)}%` }"></span>
             </div>
             <p v-if="phase === 'error'" class="text-center text-sm text-danger" role="alert">{{ error }}</p>
             <audio v-if="phase === 'preview' && previewUrl" :src="previewUrl" controls class="w-full"></audio>
-            <div class="flex w-full flex-col gap-2">
+            <div class="rec-actions flex w-full flex-col gap-2">
                 <button
                     v-if="phase !== 'recording' && phase !== 'preview'"
                     type="button"

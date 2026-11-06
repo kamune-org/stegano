@@ -40,8 +40,8 @@ const live = computed(() => {
 </script>
 
 <template>
-    <div class="flex flex-col gap-2.5 pt-1" role="group" aria-label="Capacity">
-        <div class="flex items-baseline justify-between gap-3 text-[14px]">
+    <div class="cap flex flex-col gap-2.5 pt-1" role="group" aria-label="Capacity">
+        <div class="cap-row flex items-baseline justify-between gap-3 text-[14px]">
             <p class="min-w-0 truncate text-muted">
                 <span class="font-semibold text-ink">{{ payloadLabel }}</span>
                 of {{ approx ? "≈ " : "" }}{{ formatBytes(recommended) }} safe
@@ -59,7 +59,7 @@ const live = computed(() => {
             <div class="meter-fill" :class="zone ?? ''" :style="{ width: fill + '%' }"></div>
             <div class="meter-marker" :style="{ left: marker + '%' }" aria-hidden="true"></div>
         </div>
-        <p class="t-caption">Holds up to {{ approx ? "≈ " : "" }}{{ formatBytes(capacity) }} in total.</p>
+        <p class="t-caption cap-holds">Holds up to {{ approx ? "≈ " : "" }}{{ formatBytes(capacity) }} in total.</p>
         <p class="sr-only" aria-live="polite">{{ live }}</p>
     </div>
 </template>
